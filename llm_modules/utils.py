@@ -17,10 +17,11 @@ def sanitizeFilename(name: Any) -> str:
             .replace(":", "_")
             .replace("+", "_")
             .replace(" ", "_")
-            .replace("/", "_"))
+            .replace("/", "_")
+            .replace("|", "_"))
 
 
-def parseJsonField(value: Any, fieldName: str, taskID: str) -> Any:
+def parsePairListField(value: Any, fieldName: str, taskID: str) -> Any:
     """
     解析 Task CSV 的 JSON 欄位字串。
     None / NaN → raise TaskBuildError；其他非字串 → 原樣回傳；字串 → json.loads（失敗往上拋）。
@@ -34,16 +35,16 @@ def parseJsonField(value: Any, fieldName: str, taskID: str) -> Any:
 class ReadLLMConfig:
     """讀取 YAML 設定檔並透過 Pydantic (LLMAppConfig) 驗證。"""
     def __init__(self, configPath: str):
-        rawYamlDict = self.loadYamlConfiguration(configPath)
+        rawYamlDict = self.loadYaml(configPath)
         self.config: LLMAppConfig = LLMAppConfig(**rawYamlDict)
 
-    def loadYamlConfiguration(self, path: str) -> Dict[str, Any]:
+    def loadYaml(self, path: str) -> Dict[str, Any]:
         """以 UTF-8 載入 YAML 並回傳 dict。"""
         with open(path, 'r', encoding='utf-8') as f:
             return yaml.safe_load(f)
 
 
-def initializeGlobalLogger(logDir="./logs", logName="experiment.log"):
+def initializeGlobalLogger(logDir: str = "./logs", logName: str = "experiment.log") -> None:
     """
     設定全域 Logger，同時輸出到檔案與標準輸出。
     httpx logger 拉到 WARNING，避免推論時被連線層 INFO 訊息淹沒。
@@ -63,7 +64,7 @@ def initializeGlobalLogger(logDir="./logs", logName="experiment.log"):
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.info(f"[Logger] 初始化完成 → {logPathStr}")
 
-def setupSeed(seed=42):
+def setupSeed(seed: int = 42) -> None:
     """固定 Python random / NumPy / PYTHONHASHSEED，確保實驗可重現。Ollama 端隨機性由 temperature=0 控制。"""
     random.seed(seed)
     np.random.seed(seed)

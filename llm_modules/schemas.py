@@ -1,11 +1,18 @@
 """Pydantic schema、自定義例外、資料模型的單一事實來源。"""
 from pathlib import Path
-from pydantic import BaseModel, Field, model_validator
-from typing import Dict, Any, List, Optional, ClassVar, FrozenSet
+from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
+from typing import Dict, Any, List, Optional, ClassVar, FrozenSet, TypeAlias
 
 
 # 任何處理 pair 的模組都應引用此常數，避免 'itemID'/'label' 硬編碼散落多處
 RESERVED_PAIR_FIELDS: FrozenSet[str] = frozenset({'itemID', 'label'})
+
+
+# ── 語意化型別別名：純為提升可讀性與 IDE 提示，型別檢查器仍視為 str ──────────
+ModelName: TypeAlias = str   # Ollama 模型名稱，如 "llama3.2:1b"
+PromptID:  TypeAlias = str   # Prompt 策略識別碼
+TaskID:    TypeAlias = str   # Task 批次層級識別碼
+RawOutput: TypeAlias = str   # LLM 原始文字回應（未解析）
 
 
 # ── Config schema（依組合關係排序：葉子 → 容器）───────────────────────────────
@@ -33,7 +40,7 @@ class PathsConfig(BaseModel):
         'partialInfoPath':          'partialInfo.csv',
         'fullInfoPath':             'fullInfo.csv',
         'evalDir':                  'eval',
-        'promptPreviewPath':        'prompt_preview.csv',
+        'promptPreviewPath':        'promptPreview.csv',
     }
 
     @model_validator(mode='after')
@@ -64,22 +71,66 @@ class OllamaServerConfig(BaseModel):
     timeout: int = Field(default=1800, description="API 請求超時時間(秒)")
 
 
-class LabelMapConfig(BaseModel):
+class Classification(BaseModel):
     """
-    標籤映射設定。positive / negative 供精確比對（== 語意，可含 "1"/"true"）；
-    outputPositive / outputNegative 供 substring 掃描（in 語意，不可含 "1"/"true" 以免誤觸）。
-    未命中一律標 -1。
+    分類類別設定。classes 在清單中的索引即為整數標籤 code（0..N-1），未命中一律 -1。
+    Ollama `format` JSON schema 由此產生，強制模型只能輸出 classes 之一。
+    gold label 與 classes 的對齊由前處理負責，須完全一致（比對時大小寫不敏感、去空白）。
     """
-    positive: List[str] = Field(default_factory=lambda: ["1", "true", "yes"])
-    negative: List[str] = Field(default_factory=lambda: ["0", "false", "no", "none", "negative"])
-    outputPositive: List[str] = Field(
-        default_factory=lambda: ["yes", "positive"],
-        description="OutputParser 對 LLM 輸出做 substring 掃描的正類關鍵字"
+    classes: List[str] = Field(
+        default_factory=lambda: ["no", "yes"],
+        description="分類類別清單；索引即整數 code。二元 [no,yes] 或多分類 [negative,neutral,positive]"
     )
-    outputNegative: List[str] = Field(
-        default_factory=lambda: ["no", "negative", "none"],
-        description="OutputParser 對 LLM 輸出做 substring 掃描的負類關鍵字"
-    )
+
+    _codeByLabel: Dict[str, int] = PrivateAttr(default_factory=dict)
+
+    @model_validator(mode='after')
+    def validateAndIndexClasses(self):
+        """去空白、檢查非空 / 不重複（大小寫不敏感）/ 至少 2 類，並預建 label→code 對照表。"""
+        cleaned = [str(c).strip() for c in self.classes]
+        if any(not c for c in cleaned):
+            raise ValueError("labelSet 不可包含空字串。")
+        lowered = [c.lower() for c in cleaned]
+        if len(set(lowered)) != len(lowered):
+            raise ValueError(f"labelSet 不可重複（大小寫不敏感）: {self.classes}")
+        if len(cleaned) < 2:
+            raise ValueError(f"labelSet 至少需 2 個類別，目前: {self.classes}")
+        self.classes = cleaned
+        self._codeByLabel = {c.lower(): i for i, c in enumerate(cleaned)}
+        return self
+
+    def labelToCode(self, label: Any) -> int:
+        """字串標籤 → 索引 code；大小寫不敏感、去空白；未命中回 -1。"""
+        if label is None:
+            return -1
+        return self._codeByLabel.get(str(label).strip().lower(), -1)
+
+    def buildResponseSchema(self, single: bool) -> Dict[str, Any]:
+        """
+        產生 Ollama `format` 用的 JSON schema。
+        single：單筆預測 {"label": <enum>}；batch：{"answers": [{"id": int, "label": <enum>}]}。
+        """
+        labelProp = {"type": "string", "enum": self.classes}
+        if single:
+            return {
+                "type": "object",
+                "properties": {"label": labelProp},
+                "required": ["label"],
+            }
+        return {
+            "type": "object",
+            "properties": {
+                "answers": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {"id": {"type": "integer"}, "label": labelProp},
+                        "required": ["id", "label"],
+                    },
+                }
+            },
+            "required": ["answers"],
+        }
 
 
 class LLMAppConfig(BaseModel):
@@ -95,17 +146,24 @@ class LLMAppConfig(BaseModel):
     labelColumn: Optional[str] = Field(default=None, description="single-target 模式下攜帶 true label 的欄位名")
     ollamaServer: OllamaServerConfig = Field(default_factory=OllamaServerConfig)
     llmOptions: Dict[str, Any] = Field(default_factory=lambda: {"temperature": 0}, description="LLM 推論參數")
-    labelMap: LabelMapConfig = Field(default_factory=LabelMapConfig)
+    labelSet: Classification = Field(default_factory=Classification, description="分類類別清單（字串陣列，如 ['no','yes']）；索引即整數 code")
     maxPairsPerBatch: int = Field(default=1, description="每個 LLM task 包含的 item 數；>1 為批次模式")
     concurrencyPerModel: int = Field(default=8, description="每個模型的最大非同步併發數")
     maxConcurrentModels: int = Field(default=1, description="最大同時運行的模型數量")
     taskTemplate: str = Field(..., description="組裝 userPrompt 的文字模板；{key} 對應 context 欄位，{pairs} 對應批次展開")
     pairTemplate: Optional[str] = Field(default=None, description="單筆 pair 的格式化模板；不設定代表單筆模式")
 
-    @property
-    def isSingleTarget(self) -> bool:
-        """pairColumns 為空 → single-target；否則 multi-target。"""
-        return not self.pairColumns
+    @field_validator('labelSet', mode='before')
+    @classmethod
+    def _coerceLabelSet(cls, v):
+        """labelSet 寫成字串清單（如 ['no','yes']），於此包成 Classification。"""
+        if isinstance(v, Classification):
+            return v
+        if not isinstance(v, list):
+            raise ValueError(
+                f"labelSet 必須是字串清單（如 ['no','yes']），收到 {type(v).__name__}。"
+            )
+        return {'classes': v}
 
     @model_validator(mode='after')
     def validateTargetMode(self):
@@ -133,20 +191,14 @@ class LLMAppConfig(BaseModel):
                 )
         return self
 
+    @property
+    def isSingleTarget(self) -> bool:
+        """pairColumns 為空 → single-target；否則 multi-target。"""
+        return not self.pairColumns
 
-# ── 任務執行單位 ──────────────────────────────────────────────────────────
-class LLMTask(BaseModel):
-    """
-    一次 LLM API 呼叫的輸入結構。
-    唯一性由 composite key (model, promptID, taskID) 保證，不用字串拼接以避免特殊字元歧義。
-    """
-    taskID: str = Field(..., min_length=1, description="批次層級識別碼")
-    model: str = Field(..., min_length=1, description="Ollama 模型名稱")
-    promptID: str = Field(..., min_length=1, description="Prompt 策略識別碼")
-    sysPrompt: str = Field(default="", description="系統提示詞")
-    userPrompt: str = Field(..., min_length=1, description="使用者提示詞")
-    pairs: List[Dict[str, Any]] = Field(default_factory=list, description="此任務包含的 pair 清單（含 itemID/label）")
-    context: Dict[str, Any] = Field(default_factory=dict, description="Task 層級 context 欄位")
+    def buildResponseSchema(self) -> Dict[str, Any]:
+        """回傳 Ollama `format` JSON schema（single → {label}；batch → {answers:[{id,label}]}）。"""
+        return self.labelSet.buildResponseSchema(single=self.isSingleTarget)
 
 
 # ── Pipeline 例外體系 ─────────────────────────────────────────────────────
@@ -169,3 +221,18 @@ class InferenceError(PipelineError):
 class ParsingError(PipelineError):
     """解析輸出失敗：找不到 raw.csv、解析後無有效資料等。"""
     pass
+
+
+# ── 任務執行單位 ──────────────────────────────────────────────────────────
+class LLMTask(BaseModel):
+    """
+    一次 LLM API 呼叫的輸入結構。
+    唯一性由 composite key (model, promptID, taskID) 保證，不用字串拼接以避免特殊字元歧義。
+    """
+    taskID:    TaskID    = Field(..., min_length=1, description="批次層級識別碼")
+    model:     ModelName = Field(..., min_length=1, description="Ollama 模型名稱")
+    promptID:  PromptID  = Field(..., min_length=1, description="Prompt 策略識別碼")
+    sysPrompt: str       = Field(default="", description="系統提示詞")
+    userPrompt: str      = Field(..., min_length=1, description="使用者提示詞")
+    pairs: List[Dict[str, Any]] = Field(default_factory=list, description="此任務包含的 pair 清單（含 itemID/label）")
+    context: Dict[str, Any] = Field(default_factory=dict, description="Task 層級 context 欄位")

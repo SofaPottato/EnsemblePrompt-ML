@@ -30,7 +30,7 @@ Prompt 組合 CSV ───────────────────┘
 ├── call_LLM.py              # 進入點
 ├── configs/
 │   ├── PPI_config.yaml      # LLL（PPI）任務設定
-│   └── llm_config.yaml      # BC5CDR 任務設定
+│   └── BC5CDR_config.yaml   # BC5CDR 任務設定
 ├── llm_modules/
 │   ├── Pipeline.py          # 流程統籌
 │   ├── OllamaEngine.py      # 非同步推論引擎（含斷點續傳）

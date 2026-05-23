@@ -1,10 +1,11 @@
-PyYAML
-numpy
-pandas
-tqdm
-httpx
-tenacity
-pydantic
-seaborn
-matplotlib
-scikit-learn
+# Python 3.11.14 
+PyYAML==6.0.3
+numpy==1.26.4
+pandas==2.1.4
+tqdm==4.67.1
+httpx==0.28.1
+tenacity==9.1.4
+pydantic==2.12.5
+seaborn==0.13.2
+matplotlib==3.7.5
+scikit-learn==1.4.2

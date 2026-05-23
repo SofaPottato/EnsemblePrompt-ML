@@ -11,7 +11,7 @@ _ROOT = Path(__file__).parent
 def startLLMPipeline() -> int:
     """初始化 logger/seed、建立 Pipeline 並執行。回傳 0 成功，1 失敗。"""
     parserObj = argparse.ArgumentParser(description="LLM Inference Runner")
-    parserObj.add_argument('--config', type=str, default=str(_ROOT / 'configs' / 'llm_config.yaml'),
+    parserObj.add_argument('--config', type=str, default=str(_ROOT / 'configs' / 'PPI_config.yaml'),
                            help='Path to YAML config file (e.g. configs/PPI_config.yaml)')
     argsObj = parserObj.parse_args()
     initializeGlobalLogger(logDir=str(_ROOT / 'logs'), logName="llmLog.log")

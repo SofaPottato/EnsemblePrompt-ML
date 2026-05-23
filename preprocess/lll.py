@@ -32,7 +32,8 @@ def preprocess():
 
     tasks = []
     for i, row in df.iterrows():
-        label = "true" if str(row['isValid']).strip().upper() == "TRUE" else "false"
+        # gold label 須與 config.labelSet.classes (["no", "yes"]) 完全對齊
+        label = "yes" if str(row['isValid']).strip().upper() == "TRUE" else "no"
         tasks.append({
             "taskID":  str(row['passageid']) + f"_{i}",
             "passage": str(row['passage']),
