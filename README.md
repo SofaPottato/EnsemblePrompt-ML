@@ -29,62 +29,68 @@ Prompt 組合 CSV ───────────────────┘  
 
 ## 系統架構
 
-下圖呈現「進入點 → Pipeline 六階段 → 各階段負責模組 → 落盤產出 → 外部依賴」的整體結構。階段間以檔案傳遞，星號（★）標示的 `raw.csv` 同時是斷點續傳的單一狀態來源。
+下圖呈現「進入點 → Pipeline 六階段 → 各階段負責模組 → 落盤產出 → 外部依賴」的整體結構。階段間以檔案傳遞，標示為 ★checkpoint 的 `raw.csv` 同時是斷點續傳的單一狀態來源。
 
-```
-                              ┌──────────────────────────┐
-                              │      call_LLM.py         │   進入點
-                              │   --config xxx.yaml      │   exit 0 / 1
-                              └────────────┬─────────────┘
-                                           │  載入 + 驗證 LLMAppConfig
-                                           ▼
-        ┌────────────────────────────────────────────────────────────────┐
-        │        ExperimentPipeline  (llm_modules/Pipeline.py)            │
-        │                       六階段流程統籌                             │
-        └────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    %% 進入點
+    Entry["<b>call_LLM.py</b><br/>--config xxx.yaml<br/>exit 0 / 1"]
+    Pipeline["<b>ExperimentPipeline</b><br/>llm_modules/Pipeline.py<br/>六階段流程統籌"]
+    Entry -->|"載入並驗證 LLMAppConfig"| Pipeline
 
-   輸入                       階段 / 模組                       落盤產出
- ───────────────         ──────────────────────────         ──────────────────────
+    %% 輸入
+    subgraph Inputs["輸入"]
+        direction TB
+        Cfg["configs/*.yaml"]
+        TaskCsv["Task CSV"]
+        PromptCsv["Prompt 組合 CSV"]
+    end
+    Inputs --> S1
 
- configs/*.yaml ──┐
-                  │
- Task CSV ────────┼──▶  ① Load        schemas.py             (記憶體中的 DataFrame)
-                  │       └─ 驗證 single/multi-target
- Prompt CSV ──────┘
-                                                              promptPreview.csv
-                       ② Build       PromptFormatter.py  ──▶  (所有 promptID×task
-                          └─ taskTemplate / pairTemplate 渲染   渲染後的 prompt 預覽)
-                          └─ maxPairsPerBatch 切批
+    %% 六階段
+    S1["① <b>Load</b> · schemas.py<br/>驗證 single / multi-target"]
+    S2["② <b>Build</b> · PromptFormatter.py<br/>taskTemplate / pairTemplate 渲染<br/>maxPairsPerBatch 切批"]
+    S3["③ <b>Inference</b> · OllamaEngine.py<br/>雙層 semaphore · asyncio.Lock<br/>httpx → Ollama HTTP API"]
+    S4["④ <b>Parse</b> · OutputParser.py<br/>structured JSON → predLabel<br/>解析失敗 / Error → -1"]
+    S5["⑤ <b>Process</b> · LLMResultProcessor.py<br/>long → wide pivot<br/>trueLabel 對齊 labelSet"]
+    S6["⑥ <b>Evaluate</b> · Evaluate.py<br/>Accuracy/Precision/Recall/F1/MCC<br/>混淆矩陣 · 對錯熱圖 · Upper Bound"]
 
-                       ③ Inference   OllamaEngine.py     ──▶  raw.csv  ★checkpoint
-                          └─ 雙層 semaphore                    (append-only;
-                          └─ asyncio.Lock 序列化寫檔             flush()+fsync())
-                          └─ httpx → Ollama HTTP API
-                                          │
-                                          ▼
-                                ┌──────────────────────┐
-                                │  Ollama Server       │   外部依賴
-                                │  localhost:11434     │   (ollama serve)
-                                └──────────────────────┘
+    Pipeline --> S1
+    S1 --> S2 --> S3 --> S4 --> S5 --> S6
 
-                       ④ Parse       OutputParser.py    ──▶  result.csv
-                          └─ structured JSON → predLabel       (長表;一列一 pair)
-                          └─ 解析失敗 / Error → -1
+    %% 外部依賴
+    Ollama[("Ollama Server<br/>localhost:11434")]
+    S3 <-->|"HTTP"| Ollama
 
-                       ⑤ Process     LLMResultProcessor ──▶  partialInfo.csv
-                          └─ long → wide pivot                fullInfo.csv
-                          └─ trueLabel 對齊 labelSet           (寬表;一列一樣本)
+    %% 落盤產出
+    O2["promptPreview.csv"]
+    O3["raw.csv<br/>★checkpoint<br/>append-only · fsync"]
+    O4["result.csv<br/>(長表)"]
+    O5["partialInfo.csv<br/>fullInfo.csv<br/>(寬表)"]
+    O6["eval/<br/>evalSummary.csv<br/>samplesToReview.csv<br/>correctnessHeatmap.png<br/>plots/CM_*.png"]
 
-                       ⑥ Evaluate    Evaluate.py        ──▶  eval/
-                          └─ Accuracy/Precision/Recall          ├─ evalSummary.csv
-                             /F1/MCC                            ├─ samplesToReview.csv
-                          └─ 混淆矩陣 / 對錯熱圖                  ├─ correctnessHeatmap.png
-                          └─ Upper Bound 分析                   └─ plots/CM_*.png
+    S2 -.產出.-> O2
+    S3 -.產出.-> O3
+    S4 -.產出.-> O4
+    S5 -.產出.-> O5
+    S6 -.產出.-> O6
 
- ────────────────────────────────────────────────────────────────────────────────
-  支援模組
-    schemas.py   Pydantic config / PipelineError 家族 / LLMTask / Classification
-    utils.py     logger / random seed / YAML 載入 / JSON 寬鬆解析
+    %% 支援模組
+    Support["<b>支援模組</b><br/>schemas.py — Pydantic config / PipelineError / LLMTask / Classification<br/>utils.py — logger / seed / YAML / JSON 寬鬆解析"]
+    Pipeline -.依賴.-> Support
+
+    %% 樣式
+    classDef stage fill:#e3f2fd,stroke:#1565c0,color:#0d47a1
+    classDef output fill:#fff8e1,stroke:#f9a825,color:#5d4037
+    classDef input fill:#f1f8e9,stroke:#558b2f,color:#1b5e20
+    classDef ext fill:#fce4ec,stroke:#c2185b,color:#880e4f
+    classDef entry fill:#ede7f6,stroke:#4527a0,color:#311b92
+
+    class S1,S2,S3,S4,S5,S6 stage
+    class O2,O3,O4,O5,O6 output
+    class Cfg,TaskCsv,PromptCsv input
+    class Ollama ext
+    class Entry,Pipeline,Support entry
 ```
 
 ## 目錄結構
