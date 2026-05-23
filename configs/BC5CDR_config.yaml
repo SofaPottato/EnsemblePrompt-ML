@@ -5,9 +5,9 @@
 
 # --- 路徑 ---
 paths:
-  taskCsvPath:   "data/test/tasks.csv"
-  promptCmbPath: "data/prompt_output/testPrompt.csv"
-  outputRoot:    "data/testv1/output"
+  taskCsvPath:   "data/BCVCDR_example.csv"
+  promptCmbPath: "data/example_prompts.csv"
+  outputRoot:    "data/example_BCVCDR"
 
   # 可選 override（未填則用預設檔名，全部放在 outputRoot 底下）
   rawOutputPath:            "raw.csv"
@@ -34,12 +34,10 @@ taskTemplate: |
 
   Pairs to analyze:
   {pairs}
-# structured 模式下輸出格式（含每筆 id/label）由 JSON schema 強制，
-# 不再需要寫死 numbered list / "1: Yes/No" / no Markdown 等 OUTPUT RULES。
 
 # --- 分類設定 ---
 # 二元範例: ["True","False"]　多分類範例: ["negative","neutral","positive"]
-labelSet: ["False", "True"]
+labelSet: ["no", "yes"]
 
 # pairColumns：pairs JSON 中對應 pairTemplate 佔位符的欄位名稱
 pairColumns: ["e1", "e2"]
@@ -54,7 +52,7 @@ ollamaServer:
 # --- 推論參數 ---
 llmOptions:
   temperature:    0
-  num_predict:    60
+  num_predict:    512
   num_ctx:        8192
   num_gpu:        99
 
