@@ -27,6 +27,66 @@ Prompt 組合 CSV ───────────────────┘  
 5. **Process** — [LLMResultProcessor](llm_modules/LLMResultProcessor.py) 長表轉寬表：每個 `model|promptID` 一欄。
 6. **Evaluate** — [PromptCmbEval](llm_modules/Evaluate.py) 計算 Accuracy/Precision/Recall/F1/MCC、混淆矩陣、難題清單與 Upper Bound。
 
+## 系統架構
+
+下圖呈現「進入點 → Pipeline 六階段 → 各階段負責模組 → 落盤產出 → 外部依賴」的整體結構。階段間以檔案傳遞，星號（★）標示的 `raw.csv` 同時是斷點續傳的單一狀態來源。
+
+```
+                              ┌──────────────────────────┐
+                              │      call_LLM.py         │   進入點
+                              │   --config xxx.yaml      │   exit 0 / 1
+                              └────────────┬─────────────┘
+                                           │  載入 + 驗證 LLMAppConfig
+                                           ▼
+        ┌────────────────────────────────────────────────────────────────┐
+        │        ExperimentPipeline  (llm_modules/Pipeline.py)            │
+        │                       六階段流程統籌                             │
+        └────────────────────────────────────────────────────────────────┘
+
+   輸入                       階段 / 模組                       落盤產出
+ ───────────────         ──────────────────────────         ──────────────────────
+
+ configs/*.yaml ──┐
+                  │
+ Task CSV ────────┼──▶  ① Load        schemas.py             (記憶體中的 DataFrame)
+                  │       └─ 驗證 single/multi-target
+ Prompt CSV ──────┘
+                                                              promptPreview.csv
+                       ② Build       PromptFormatter.py  ──▶  (所有 promptID×task
+                          └─ taskTemplate / pairTemplate 渲染   渲染後的 prompt 預覽)
+                          └─ maxPairsPerBatch 切批
+
+                       ③ Inference   OllamaEngine.py     ──▶  raw.csv  ★checkpoint
+                          └─ 雙層 semaphore                    (append-only;
+                          └─ asyncio.Lock 序列化寫檔             flush()+fsync())
+                          └─ httpx → Ollama HTTP API
+                                          │
+                                          ▼
+                                ┌──────────────────────┐
+                                │  Ollama Server       │   外部依賴
+                                │  localhost:11434     │   (ollama serve)
+                                └──────────────────────┘
+
+                       ④ Parse       OutputParser.py    ──▶  result.csv
+                          └─ structured JSON → predLabel       (長表;一列一 pair)
+                          └─ 解析失敗 / Error → -1
+
+                       ⑤ Process     LLMResultProcessor ──▶  partialInfo.csv
+                          └─ long → wide pivot                fullInfo.csv
+                          └─ trueLabel 對齊 labelSet           (寬表;一列一樣本)
+
+                       ⑥ Evaluate    Evaluate.py        ──▶  eval/
+                          └─ Accuracy/Precision/Recall          ├─ evalSummary.csv
+                             /F1/MCC                            ├─ samplesToReview.csv
+                          └─ 混淆矩陣 / 對錯熱圖                  ├─ correctnessHeatmap.png
+                          └─ Upper Bound 分析                   └─ plots/CM_*.png
+
+ ────────────────────────────────────────────────────────────────────────────────
+  支援模組
+    schemas.py   Pydantic config / PipelineError 家族 / LLMTask / Classification
+    utils.py     logger / random seed / YAML 載入 / JSON 寬鬆解析
+```
+
 ## 目錄結構
 
 ```
