@@ -152,7 +152,9 @@ class ExperimentPipeline:
         if 'promptID' not in promptDatadf.columns or 'promptText' not in promptDatadf.columns:
             raise DataLoadError("Prompt CSV 缺少 'promptID' 或 'promptText' 欄位。")
 
-        return [PromptCmb(**row) for row in promptDatadf[['promptID', 'promptText']].to_dict('records')]
+        promptCmbList = [PromptCmb(**row) for row in promptDatadf[['promptID', 'promptText']].to_dict('records')]
+        logging.info(f"[Loader] Prompt CSV 載入完成: {len(promptCmbList)} 筆 from {csvPath}")
+        return promptCmbList
 
     def loadCompletedTaskRunIDs(self) -> Set[TaskRunID]:
         """
