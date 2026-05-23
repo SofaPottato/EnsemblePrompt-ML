@@ -15,7 +15,7 @@ paths:
   singlePromptCmbOutputDir: "singleOutput"
   partialInfoPath:          "partialInfo.csv"
   fullInfoPath:             "fullInfo.csv"
-  promptPreviewPath:        "prompt_preview.csv"
+  promptPreviewPath:        "promptPreview.csv"
   evalDir:                  "eval"
 
 # --- 模型 ---
@@ -30,15 +30,16 @@ taskTemplate: |
   Abstract: {abstract}
 
   Task: Determine if the Chemical induces the Disease for the following pairs based strictly on the text.
+  For each pair, answer with exactly one of the allowed labels: no, yes.
 
   Pairs to analyze:
   {pairs}
+# structured 模式下輸出格式（含每筆 id/label）由 JSON schema 強制，
+# 不再需要寫死 numbered list / "1: Yes/No" / no Markdown 等 OUTPUT RULES。
 
-  IMPORTANT OUTPUT RULES:
-  1. Output ONLY a numbered list.
-  2. Format: "1: Yes" or "1: No"
-  3. Do NOT provide explanations.
-  4. Do NOT use Markdown formatting.
+# --- 分類設定 ---
+# 二元範例: ["True","False"]　多分類範例: ["negative","neutral","positive"]
+labelSet: ["False", "True"]
 
 # pairColumns：pairs JSON 中對應 pairTemplate 佔位符的欄位名稱
 pairColumns: ["e1", "e2"]
@@ -56,11 +57,6 @@ llmOptions:
   num_predict:    60
   num_ctx:        8192
   num_gpu:        99
-
-# --- 標籤映射 ---
-labelMap:
-  positive: ["cid"]
-  negative: ["0", "false", "none", "negative"]
 
 # --- 並發控制 ---
 concurrencyPerModel: 2 #每個模型同時處理多少個 task（不含 Ollama 內部的並發控制）

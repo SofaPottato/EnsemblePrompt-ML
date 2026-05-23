@@ -31,10 +31,11 @@ def preprocess():
 
     tasks = []
     for pmid, group in df.groupby('PMID', sort=False):
+        # gold label 須與 config.labelSet.classes (["no", "yes"]) 完全對齊：CID → yes
         pairs = [
             {
                 'itemID': str(row['ID']),
-                'label':  str(row['Relation_Type']),
+                'label':  "yes" if str(row['Relation_Type']).strip().upper() == "CID" else "no",
                 'e1':     str(row['E1_Name']),
                 'e2':     str(row['E2_Name'])
             }

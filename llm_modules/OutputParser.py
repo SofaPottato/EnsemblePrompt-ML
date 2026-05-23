@@ -1,37 +1,28 @@
 import pandas as pd
 import json
 import logging
-import re
 from pathlib import Path
 from typing import List, Optional
-from .schemas import ParsingError, LabelMapConfig, RESERVED_PAIR_FIELDS
+from .schemas import ParsingError, Classification, RESERVED_PAIR_FIELDS
 from .utils import sanitizeFilename
 
 
 class OutputParser:
     """
-    將 LLM 純文字回應解析為結構化資料表。
-    raw.csv → result.csv（predLabel 0/1/-1）。
-    single / batch 模式共用同一組關鍵字（來自 labelMapConfig.outputPositive / outputNegative），
-    無法判定一律標 -1，由下游評估時排除。
+    將 LLM structured JSON 回應解析為結構化資料表。
+    raw.csv → result.csv（predLabel = classes 索引 0..N-1，無法判定一律 -1）。
+    JSON 解析失敗或 label 不在 classes 中一律標 -1，由下游評估排除。
     """
-
-    # 切割 LLM 批次回應的行首編號（如 "1:", "No. 2", "3)"）
-    _NUMBERED_LINE_RE = re.compile(
-        r'\n\s*(?:\s+|No\.?\s*)?\d+\s*[:.)-]',
-        flags=re.IGNORECASE
-    )
 
     _CSV_KWARGS = {'index': False, 'encoding': 'utf-8-sig'}
 
-    def __init__(self, rawOutputCsvPath: Path, parsedOutputCsvPath: Path, singlePromptCmbOutputDir: Path,
-                 labelMapConfig: Optional[LabelMapConfig] = None):
+    def __init__(self, rawOutputCsvPath: Path, parsedOutputCsvPath: Path,
+                 singlePromptCmbOutputDir: Path,
+                 labelSet: Optional[Classification] = None):
         self.rawOutputCsvPath = Path(rawOutputCsvPath)
         self.parsedOutputCsvPath = Path(parsedOutputCsvPath)
         self.singlePromptCmbOutputDir = Path(singlePromptCmbOutputDir)
-        self.labelMapConfig = labelMapConfig or LabelMapConfig()
-        self._posKeywords = [k.lower() for k in self.labelMapConfig.outputPositive]
-        self._negKeywords = [k.lower() for k in self.labelMapConfig.outputNegative]
+        self.labelSet = labelSet or Classification()
 
     def run(self) -> Path:
         """主流程：讀 raw.csv → 逐 task 解析 → pair 展開（long format）→ 排序 → 存檔。"""
@@ -96,11 +87,9 @@ class OutputParser:
             "predLabel": predLabel,
             "rawOutput": rawOutput,
         }
-        # pair 中非保留欄位（id, e1, e2 等）全部帶入
         for fieldName, fieldVal in pairDict.items():
             if fieldName not in RESERVED_PAIR_FIELDS:
                 rowDict[fieldName] = fieldVal
-        # context 欄位補充（pair 優先，不覆蓋）
         for fieldName, fieldVal in contextDict.items():
             if fieldName not in rowDict:
                 rowDict[fieldName] = fieldVal
@@ -144,34 +133,57 @@ class OutputParser:
 
     def _extractAnswers(self, text: str, batchSize: int) -> List[int]:
         """
-        從 LLM 回應切分出每一題的答案，回傳長度為 batchSize 的 list（1/0/-1）。
-        "Error:" 開頭 → 全部 -1；batchSize > 1 → 以行首編號 regex 切段再逐段掃描。
+        解析 LLM JSON 輸出，回傳長度為 batchSize 的 code list（classes 索引 / -1）。
+        "Error:" 或空 → 全部 -1。
         """
         labelResultsList = [-1] * batchSize
         if not text or "Error:" in text:
             return labelResultsList
+        return self._extractStructured(text, batchSize)
 
-        text = text.replace('*', '')  # 移除 Markdown 粗體標記，避免干擾關鍵字掃描
-
-        if batchSize == 1:
-            labelResultsList[0] = self._scanBlock(text.strip())
-            return labelResultsList
-
-        blocks = self._NUMBERED_LINE_RE.split("\n" + text.strip())[1:]
-        for i in range(batchSize):
-            if i < len(blocks):
-                labelResultsList[i] = self._scanBlock(blocks[i])
-
-        return labelResultsList
-
-    def _scanBlock(self, blockText: str) -> int:
+    def _extractStructured(self, text: str, batchSize: int) -> List[int]:
         """
-        Substring 關鍵字掃描，回傳 1 / 0 / -1。
-        正類優先：同時出現正負關鍵字時（如 "yes, but no..."），通常 yes 才是主要答案。
+        解析 structured JSON 輸出。
+        single：{"label": ...} → [code]；batch：{"answers": [{"id", "label"}]} → 依 id（1-based）或順序回填。
+        JSON 解析失敗或結構不符 → 對應位置維持 -1（下游評估排除）。
         """
-        loweredText = blockText.lower()
-        if any(k in loweredText for k in self._posKeywords):
-            return 1
-        if any(k in loweredText for k in self._negKeywords):
-            return 0
-        return -1
+        results = [-1] * batchSize
+        obj = self._loadJsonObject(text)
+        if obj is None:
+            logging.warning("[Parser] 輸出非合法 JSON 物件，全標 -1")
+            return results
+
+        answers = obj.get("answers")
+        if isinstance(answers, list):
+            for pos, ans in enumerate(answers):
+                if not isinstance(ans, dict):
+                    continue
+                idx = self._resolveAnswerIndex(ans.get("id"), pos, batchSize)
+                if idx is not None:
+                    results[idx] = self.labelSet.labelToCode(ans.get("label"))
+            return results
+
+        # single-target schema：{"label": <enum>}
+        if "label" in obj:
+            results[0] = self.labelSet.labelToCode(obj.get("label"))
+        return results
+
+    @staticmethod
+    def _loadJsonObject(text: str):
+        """structured 模式下 rawOutput 必為合法 JSON 物件；解析失敗或非物件型一律回 None。"""
+        try:
+            obj = json.loads(text)
+            return obj if isinstance(obj, dict) else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _resolveAnswerIndex(idValue, pos: int, batchSize: int) -> Optional[int]:
+        """id 為合法 1-based 編號 → id-1；否則退回出現順序 pos；皆超出範圍回 None。"""
+        try:
+            idNum = int(str(idValue).strip())
+            if 1 <= idNum <= batchSize:
+                return idNum - 1
+        except (TypeError, ValueError):
+            pass
+        return pos if pos < batchSize else None
