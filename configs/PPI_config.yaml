@@ -6,9 +6,9 @@
 
 # --- 路徑 ---
 paths:
-  taskCsvPath:   "data/PPI/LLL/LLL-tasks.csv"       # 任務輸入檔案路徑
-  promptCmbPath: "data/promptOutput/test_auto_prompts.csv" # 組合後的 prompt 路徑
-  outputRoot:    "data/test"               # 所有推論結果的根輸出目錄
+  taskCsvPath:   'data\PPI_example.csv' # 任務輸入檔案路徑
+  promptCmbPath: 'data\example_prompts.csv' # 組合後的 prompt 路徑
+  outputRoot:    'data/example_PPI'               # 所有推論結果的根輸出目錄
 
   rawOutputPath:            "raw.csv"          # 模型原始回應（未解析）
   promptPreviewPath:        "promptPreview.csv" # 用於人工檢視的 prompt 預覽檔
@@ -33,7 +33,7 @@ taskTemplate: |
 # --- 分類設定 ---
 # 清單索引即整數 code（no=0, yes=1）；gold label 對齊由前處理負責。
 # 二元範例: ["no","yes"]　多分類範例: ["negative","neutral","positive"]
-labelSet: ["False", "True"]
+labelSet: ["no", "yes"]
 
 # single-target 模式：pairColumns 空 + 指定 labelColumn
 # Pipeline 會把 Task CSV 的 label 欄位自動包成 pairs，供下游統一處理
