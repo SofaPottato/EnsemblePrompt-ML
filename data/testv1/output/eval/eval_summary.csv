@@ -1,2 +1,0 @@
-﻿modelPromptID,Accuracy,Precision,Recall,f1Score,MCC,validCount
-llama3.2:1b_EMO01,0.6,0.27,0.39,0.32,0.05,682

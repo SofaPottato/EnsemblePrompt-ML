@@ -3,10 +3,12 @@ __pycache__/
 *.py[cod]
 *.pyo
 
-# 產生的輸出
-data/*/output/
-data/prompt_output/
+# data 目錄只保留空資料夾
+data/*
+!data/.gitkeep
 
+
+docs/
 # 模型訓練產物
 catboost_info/
 
