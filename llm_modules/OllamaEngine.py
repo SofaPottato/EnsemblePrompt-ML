@@ -59,6 +59,10 @@ class OllamaClient:
             response = await self.httpClient.post(self.apiUrl, json=payload)
             response.raise_for_status()
             return response.json().get('message', {}).get('content', '')
+        except httpx.HTTPStatusError as e: # HTTP 錯誤（4xx, 5xx）也算失敗，觸發重試；超限後記錄狀態碼與部分回應內容，然後往上拋
+            body = e.response.text[:500] if e.response is not None else ""
+            logging.warning(f"[Client] {modelName} HTTP {e.response.status_code}: {body}")
+            raise
         except Exception as e:
             logging.warning(f"[Client] {modelName} 連線異常: {e}")
             raise
@@ -137,7 +141,7 @@ class LLMEngine:
 
         # tqdm 用 context manager 包住，gather 拋例外時也能保證 bar 正確關閉
         with tqdm(total=len(taskList), desc="總推論進度", unit="batch") as progressBar, \
-             logging_redirect_tqdm():
+            logging_redirect_tqdm():
             await asyncio.gather(*[
                 self._processModelGroup(modelName, modelTaskList, progressBar)
                 for modelName, modelTaskList in tasksByModelDict.items()
@@ -198,11 +202,11 @@ class LLMEngine:
         }
 
         async with self.fileLock:
-            fileExists = os.path.isfile(self.outputFile)
+            b_fileExists = os.path.isfile(self.outputFile)
             with open(self.outputFile, 'a', encoding='utf-8-sig', newline='') as f:
                 # 固定 fieldnames = RAW_CSV_SCHEMA，保證欄位順序與下游驗證一致
                 csvWriter = csv.DictWriter(f, fieldnames=RAW_CSV_SCHEMA)
-                if not fileExists:
+                if not b_fileExists:
                     csvWriter.writeheader()
                 csvWriter.writerow(rowDataDict)
                 f.flush()

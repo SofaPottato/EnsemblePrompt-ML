@@ -28,10 +28,10 @@ class OutputParser:
         """主流程：讀 raw.csv → 逐 task 解析 → pair 展開（long format）→ 排序 → 存檔。"""
         try:
             rawDf = self._loadRawCsv()
-            parsedRowsList = self._parseAllTasks(rawDf)
-            parsedDf = self._buildResultDf(parsedRowsList)
-            self._writeOutputs(parsedDf)
-            logging.info(f"[Parser] 解析完成: {len(parsedDf)} 筆 → {self.parsedOutputCsvPath}")
+            sampleRowsList = self._parseTasksToRows(rawDf)
+            resultDf = self._buildResultDf(sampleRowsList)
+            self._writeResultCsvs(resultDf)
+            logging.info(f"[Parser] 解析完成: {len(resultDf)} 筆 → {self.parsedOutputCsvPath}")
             return self.parsedOutputCsvPath
         except ParsingError:
             raise
@@ -45,15 +45,15 @@ class OutputParser:
             raise ParsingError(f"找不到暫存結果檔案: {self.rawOutputCsvPath}")
         return pd.read_csv(str(self.rawOutputCsvPath), encoding='utf-8-sig')
 
-    def _parseAllTasks(self, rawDf: pd.DataFrame) -> list:
-        hasContextCol = 'context' in rawDf.columns
-        parsedRowsList = []
+    def _parseTasksToRows(self, rawDf: pd.DataFrame) -> list:
+        b_hasContextCol = 'context' in rawDf.columns
+        sampleRowsList = []
         for _, taskRow in rawDf.iterrows():
-            parsedRowsList.extend(self._parseTaskRow(taskRow, hasContextCol))
-        return parsedRowsList
+            sampleRowsList.extend(self._parseTaskRow(taskRow, b_hasContextCol))
+        return sampleRowsList
 
-    def _parseTaskRow(self, taskRow, hasContextCol: bool) -> list:
-        """一列 task row → 展開成多列 rowDict（每個 pair 一列）。"""
+    def _parseTaskRow(self, taskRow, b_hasContextCol: bool) -> list:
+        """一列 task row → 展開成多列 sampleRow（每個 pair 一列）。"""
         model    = taskRow.get('model')
         promptID = taskRow.get('promptID')
         taskID   = str(taskRow.get('taskID', ''))
@@ -64,23 +64,23 @@ class OutputParser:
             return []
 
         rawOutput   = str(taskRow.get('rawOutput', ''))
-        answers     = self._extractAnswers(rawOutput, len(pairsList))
+        predCodes   = self._extractPredCodes(rawOutput, len(pairsList))
         contextDict = (self._parseJsonCell(taskRow.get('context'), default={})
-                       if hasContextCol else {})
+                       if b_hasContextCol else {})
 
         return [
-            self._buildRow(model, promptID, taskID, rawOutput,
-                           pairDict, answers[j], j, len(pairsList), contextDict)
+            self._buildSampleRow(model, promptID, taskID, rawOutput,
+                           pairDict, predCodes[j], j, len(pairsList), contextDict)
             for j, pairDict in enumerate(pairsList)
         ]
 
-    def _buildRow(self, model, promptID, taskID, rawOutput,
+    def _buildSampleRow(self, model, promptID, taskID, rawOutput,
                   pairDict: dict, predLabel: int,
                   pairIndex: int, totalPairs: int, contextDict: dict) -> dict:
-        """單一 pair + 對應預測標籤 → rowDict。"""
-        itemID = pairDict.get('itemID') or (f"{taskID}_{pairIndex}" if totalPairs > 1 else taskID)
-        rowDict = {
-            "itemID":    itemID,
+        """單一 pair + 對應預測標籤 → sampleRow。"""
+        sampleID = pairDict.get('sampleID') or (f"{taskID}_{pairIndex}" if totalPairs > 1 else taskID)
+        sampleRow = {
+            "sampleID":  sampleID,
             "model":     model,
             "promptID":  promptID,
             "trueLabel": pairDict.get('label', ''),
@@ -89,22 +89,22 @@ class OutputParser:
         }
         for fieldName, fieldVal in pairDict.items():
             if fieldName not in RESERVED_PAIR_FIELDS:
-                rowDict[fieldName] = fieldVal
+                sampleRow[fieldName] = fieldVal
         for fieldName, fieldVal in contextDict.items():
-            if fieldName not in rowDict:
-                rowDict[fieldName] = fieldVal
-        return rowDict
+            if fieldName not in sampleRow:
+                sampleRow[fieldName] = fieldVal
+        return sampleRow
 
-    def _buildResultDf(self, parsedRowsList: list) -> pd.DataFrame:
-        if not parsedRowsList:
+    def _buildResultDf(self, sampleRowsList: list) -> pd.DataFrame:
+        if not sampleRowsList:
             raise ParsingError("解析後沒有產生任何有效資料。")
-        parsedDf = pd.DataFrame(parsedRowsList)
-        return parsedDf.sort_values(['model', 'promptID', 'itemID'])
+        resultDf = pd.DataFrame(sampleRowsList)
+        return resultDf.sort_values(['model', 'promptID', 'sampleID'])
 
-    def _writeOutputs(self, parsedDf: pd.DataFrame) -> None:
+    def _writeResultCsvs(self, resultDf: pd.DataFrame) -> None:
         """輸出合併版 result.csv，同時按 promptID 分檔。"""
-        parsedDf.to_csv(str(self.parsedOutputCsvPath), **self._CSV_KWARGS)
-        for promptID, groupDf in parsedDf.groupby('promptID'):
+        resultDf.to_csv(str(self.parsedOutputCsvPath), **self._CSV_KWARGS)
+        for promptID, groupDf in resultDf.groupby('promptID'):
             singleCsvPath = self.singlePromptCmbOutputDir / f"{sanitizeFilename(promptID)}_result.csv"
             groupDf.to_csv(singleCsvPath, **self._CSV_KWARGS)
 
@@ -131,27 +131,27 @@ class OutputParser:
                 return default
         return default
 
-    def _extractAnswers(self, text: str, batchSize: int) -> List[int]:
+    def _extractPredCodes(self, text: str, batchSize: int) -> List[int]:
         """
         解析 LLM JSON 輸出，回傳長度為 batchSize 的 code list（classes 索引 / -1）。
         "Error:" 或空 → 全部 -1。
         """
-        labelResultsList = [-1] * batchSize
+        predCodes = [-1] * batchSize
         if not text or "Error:" in text:
-            return labelResultsList
-        return self._extractStructured(text, batchSize)
+            return predCodes
+        return self._parseJsonToCodes(text, batchSize)
 
-    def _extractStructured(self, text: str, batchSize: int) -> List[int]:
+    def _parseJsonToCodes(self, text: str, batchSize: int) -> List[int]:
         """
         解析 structured JSON 輸出。
         single：{"label": ...} → [code]；batch：{"answers": [{"id", "label"}]} → 依 id（1-based）或順序回填。
         JSON 解析失敗或結構不符 → 對應位置維持 -1（下游評估排除）。
         """
-        results = [-1] * batchSize
+        predCodes = [-1] * batchSize
         obj = self._loadJsonObject(text)
         if obj is None:
             logging.warning("[Parser] 輸出非合法 JSON 物件，全標 -1")
-            return results
+            return predCodes
 
         answers = obj.get("answers")
         if isinstance(answers, list):
@@ -160,13 +160,13 @@ class OutputParser:
                     continue
                 idx = self._resolveAnswerIndex(ans.get("id"), pos, batchSize)
                 if idx is not None:
-                    results[idx] = self.labelSet.labelToCode(ans.get("label"))
-            return results
+                    predCodes[idx] = self.labelSet.labelToCode(ans.get("label"))
+            return predCodes
 
         # single-target schema：{"label": <enum>}
         if "label" in obj:
-            results[0] = self.labelSet.labelToCode(obj.get("label"))
-        return results
+            predCodes[0] = self.labelSet.labelToCode(obj.get("label"))
+        return predCodes
 
     @staticmethod
     def _loadJsonObject(text: str):

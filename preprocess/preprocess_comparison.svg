@@ -110,7 +110,7 @@
     <rect x="400" y="214" width="306" height="184" rx="3" fill="#DCF0DC" stroke="#A8D8A8" stroke-width="1"/>
 
     <rect x="410" y="222" width="286" height="22" rx="3" fill="#C8EBC8"/>
-    <text x="426" y="237" font-size="10.5" fill="#888">itemID</text>
+    <text x="426" y="237" font-size="10.5" fill="#888">sampleID</text>
     <text x="690" y="237" text-anchor="end" font-size="10.5" fill="#888">ID 字串</text>
 
     <rect x="410" y="246" width="286" height="22" rx="3" fill="#DCF0DC"/>

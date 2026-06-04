@@ -1,4 +1,4 @@
-# call_LLM.py (主程式)
+# Main_PromptCmb.py (主程式)
 import argparse
 import logging
 import sys

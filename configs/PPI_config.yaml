@@ -6,9 +6,9 @@
 
 # --- 路徑 ---
 paths:
-  taskCsvPath:   'data\PPI_example.csv' # 任務輸入檔案路徑
-  promptCmbPath: 'data\example_prompts.csv' # 組合後的 prompt 路徑
-  outputRoot:    'data/example_PPI'               # 所有推論結果的根輸出目錄
+  taskCsvPath:   'exampleData\PPI_example.csv'
+  promptCmbPath: 'exampleData\example_prompts.csv'
+  outputRoot:    'exampleData\PPI'               # 所有推論結果的根輸出目錄
 
   rawOutputPath:            "raw.csv"          # 模型原始回應（未解析）
   promptPreviewPath:        "promptPreview.csv" # 用於人工檢視的 prompt 預覽檔
@@ -22,24 +22,20 @@ paths:
 # --- Prompt 模板 ---
 # contextColumns：Task CSV 中對應 taskTemplate 佔位符的欄位名稱
 contextColumns: ["passage"]  # 填入 {passage} 佔位符的來源欄位
-
 taskTemplate: |
   Sentence: {passage}
 
   Task: Based on the sentence, do PROTEIN1 and PROTEIN2 have a protein-protein interaction (PPI)?
   Answer with exactly one of the allowed labels: no, yes.
-
-
+pairColumns: []          # 多目標模式下的欄位對清單；single-target 時留空
 # --- 分類設定 ---
 # 清單索引即整數 code（no=0, yes=1）；gold label 對齊由前處理負責。
 # 二元範例: ["no","yes"]　多分類範例: ["negative","neutral","positive"]
 labelSet: ["no", "yes"]
-
 # single-target 模式：pairColumns 空 + 指定 labelColumn
 # Pipeline 會把 Task CSV 的 label 欄位自動包成 pairs，供下游統一處理
-
 maxPairsPerBatch: 1              # 每批次送入模型的最大樣本對數
-pairColumns: []          # 多目標模式下的欄位對清單；single-target 時留空
+
 labelColumn: "label"     # Task CSV 中作為正解標籤的欄位名稱
 
 
@@ -47,7 +43,7 @@ labelColumn: "label"     # Task CSV 中作為正解標籤的欄位名稱
 
 
 # --- Ollama 連線 ---
-selectedModels: ["llama3.2:1b"]  # 使用的 Ollama 模型名稱清單
+selectedModels: ["llama3.2:1b", "Qwen","gemma"]  # 使用的 Ollama 模型名稱清單
 ollamaServer:
   url:     "http://localhost:11434/api/chat"  # Ollama API 端點位址
   timeout: 600                               # 單次請求的最大等待秒數
@@ -60,6 +56,5 @@ llmOptions:
   num_predict:    60   # 最多生成的 token 數量
   num_ctx:        8192 # 模型的 context window 大小（token）
   num_gpu:        99   # 使用的 GPU 層數；99 表示盡量全部放 GPU
-  repeat_penalty: 1.1  # 重複懲罰係數；>1 抑制重複輸出
 
 

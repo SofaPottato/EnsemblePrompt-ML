@@ -1,4 +1,4 @@
-# Main_LLM
+# EnsemblePrompt_ML
 
 以 Ollama 為後端、針對生醫關係抽取（PPI、Chemical–Disease 等）任務的 LLM 推論與評估管線。
 
@@ -34,7 +34,7 @@ Prompt 組合 CSV ───────────────────┘  
 ```mermaid
 flowchart TD
     %% 進入點
-    Entry["<b>call_LLM.py</b><br/>--config xxx.yaml<br/>exit 0 / 1"]
+    Entry["<b>Main_PromptCmb.py</b><br/>--config xxx.yaml<br/>exit 0 / 1"]
     Pipeline["<b>ExperimentPipeline</b><br/>llm_modules/Pipeline.py<br/>六階段流程統籌"]
     Entry -->|"載入並驗證 LLMAppConfig"| Pipeline
 
@@ -97,7 +97,7 @@ flowchart TD
 
 ```
 .
-├── call_LLM.py               # 進入點；exit code 0 / 1
+├── Main_PromptCmb.py         # 進入點；exit code 0 / 1
 ├── configs/
 │   ├── PPI_config.yaml       # LLL（PPI，single-target）
 │   └── BC5CDR_config.yaml    # BC5CDR（Chemical–Disease，multi-target）
@@ -131,11 +131,11 @@ python preprocess/lll.py        # LLL（PPI，single-target）
 python preprocess/bc5cdr.py     # BC5CDR（Chemical–Disease，multi-target）
 
 # 2) 跑 Pipeline
-python call_LLM.py --config configs/PPI_config.yaml
-python call_LLM.py --config configs/BC5CDR_config.yaml
+python Main_PromptCmb.py --config configs/PPI_config.yaml
+python Main_PromptCmb.py --config configs/BC5CDR_config.yaml
 ```
 
-成功時 exit code 0，失敗時 exit code 1（任何 `PipelineError` 子類例外都會被 `call_LLM.py` 統一捕捉並記錄到 `logs/llmLog.log`）。
+成功時 exit code 0，失敗時 exit code 1（任何 `PipelineError` 子類例外都會被 `Main_PromptCmb.py` 統一捕捉並記錄到 `logs/llmLog.log`）。
 
 ## Single-target vs Multi-target
 
@@ -208,7 +208,7 @@ python call_LLM.py --config configs/BC5CDR_config.yaml
 | `raw.csv` | 推論原始紀錄（append-only checkpoint）；欄位 = `RAW_CSV_SCHEMA` |
 | `result.csv` | 長表，每個 pair × `(model, promptID)` 一列；`predLabel` ∈ {-1, 0..N-1} |
 | `singleOutput/{promptID}_result.csv` | 同上但依 `promptID` 切分 |
-| `partialInfo.csv` | 寬表，一列一樣本；欄位包含 `itemID`, `trueLabel`, 各 `model|promptID__pred` |
+| `partialInfo.csv` | 寬表，一列一樣本；欄位包含 `sampleID`, `trueLabel`, 各 `model|promptID__pred` |
 | `fullInfo.csv` | 同上再補 `__raw`（rawOutput）與 `__sysPrompt` 後綴欄，供人工審閱 |
 | `promptPreview.csv` | 所有 `promptID × task` 渲染後的 userPrompt 預覽 |
 | `eval/evalSummary.csv` | 各 `(model, promptID)` 的 Accuracy/Precision/Recall/F1/MCC（按 F1 排序） |
@@ -219,7 +219,7 @@ python call_LLM.py --config configs/BC5CDR_config.yaml
 ## 開發注意事項
 
 - 命名風格：變數/方法 `camelCase`、類別 `PascalCase`（不是 PEP 8 標準，但全專案一致）。
-- 錯誤統一走 `PipelineError` 家族（`DataLoadError` / `TaskBuildError` / `InferenceError` / `ParsingError`），由 `call_LLM.py` 一處 catch；各階段不要私吞例外。
-- `RESERVED_PAIR_FIELDS = {'itemID', 'label'}` 是內部欄位，[PromptFormatter._extractPairFields](llm_modules/PromptFormatter.py#L46) 會剔除，永遠不會洩漏進 prompt。新增 pair metadata 時要嘛不加進 `pairColumns`，要嘛更新這個 frozenset。
+- 錯誤統一走 `PipelineError` 家族（`DataLoadError` / `TaskBuildError` / `InferenceError` / `ParsingError`），由 `Main_PromptCmb.py` 一處 catch；各階段不要私吞例外。
+- `RESERVED_PAIR_FIELDS = {'sampleID', 'label'}` 是內部欄位，[PromptFormatter._extractPairFields](llm_modules/PromptFormatter.py#L46) 會剔除，永遠不會洩漏進 prompt。新增 pair metadata 時要嘛不加進 `pairColumns`，要嘛更新這個 frozenset。
 - `data/`、`logs/`、`docs/` 都在 gitignore 中，不要把輸出檔 commit 進來。
 - 沒有 test suite / linter / build step；驗證方式是手動檢查 `data/<dataset>/output/eval/` 下的輸出。

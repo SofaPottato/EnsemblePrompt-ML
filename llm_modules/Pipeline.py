@@ -23,7 +23,7 @@ from .schemas import (
 
 
 @dataclass
-class PromptCmb:
+class Prompt:
     promptID: PromptID
     promptText: str
 
@@ -51,7 +51,7 @@ class TaskRunID:
 class ExperimentPipeline:
     """
     實驗流程統籌：載入 → 建構任務 → 推論 → 解析 → 後處理 → 評估。
-    各階段失敗拋對應子類例外，由 call_LLM.py 統一捕捉。
+    各階段失敗拋對應子類例外，由 Main_PromptCmb.py 統一捕捉。
     """
 
     def __init__(self, config: LLMAppConfig):
@@ -69,13 +69,14 @@ class ExperimentPipeline:
         """六階段：載入 → 建構任務 → 推論 → 解析 → 後處理 → 評估。"""
         logging.info("[Step 1/6] Loading Task CSV & Prompts")
         taskDataDf = self.loadTaskData()
-        promptCmbList = self.loadPromptCmbs()
-
+        promptList = self.loadPrompts()
+        completedTaskRunIDSet = self.loadCompletedTaskRunIDs()
+        
         logging.info("[Step 2/6] Building LLM Tasks")
         taskBatchList = self._buildTaskBatches(taskDataDf)
-        self.savePromptPreview(taskBatchList, promptCmbList)
-        completedTaskRunIDSet = self.loadCompletedTaskRunIDs()
-        pendingTaskList = self.buildPendingTasks(taskBatchList, promptCmbList, completedTaskRunIDSet)
+        self._validateLabelAlignment(taskBatchList)
+        self.savePromptPreview(taskBatchList, promptList)
+        pendingTaskList = self.buildPendingTasks(taskBatchList, promptList, completedTaskRunIDSet)
 
         if not pendingTaskList and not completedTaskRunIDSet: #避免實驗意外終止沒有跑到後面的評估階段
             raise TaskBuildError("No tasks to run and no checkpoint found.")
@@ -102,7 +103,7 @@ class ExperimentPipeline:
             parsedOutputCsvPath=parsedOutputPath,
             partialInfoCsvPath=self.pathConfig.partialInfoPath,
             fullInfoCsvPath=self.pathConfig.fullInfoPath,
-            promptCmbList=[promptCmb.__dict__ for promptCmb in promptCmbList],
+            promptList=[prompt.__dict__ for prompt in promptList],
             labelSet=self.config.labelSet,
         ).run()
 
@@ -130,7 +131,7 @@ class ExperimentPipeline:
             raise DataLoadError(f"找不到 Task CSV: {csvPath}")
 
         taskDataDf = pd.read_csv(csvPath, encoding='utf-8-sig')
-        if self.config.isSingleTarget:
+        if self.config.b_isSingleTarget:
             requiredColSet = {'taskID', self.config.labelColumn} | set(self.config.contextColumns)
         else:
             requiredColSet = {'taskID', 'pairs'} | set(self.config.contextColumns)
@@ -142,19 +143,19 @@ class ExperimentPipeline:
         logging.info(f"[Loader] Task CSV 載入完成: {len(taskDataDf)} 筆 from {csvPath}")
         return taskDataDf
 
-    def loadPromptCmbs(self) -> List[PromptCmb]:
-        """載入 Prompt 組合 CSV（必要欄位：promptID, promptText），回傳 PromptCmb list。"""
+    def loadPrompts(self) -> List[Prompt]:
+        """載入 Prompt 組合 CSV（必要欄位：promptID, promptText），回傳 Prompt list。"""
         csvPath = self.pathConfig.promptCmbPath
         if not csvPath.exists():
             raise DataLoadError(f"找不到 Prompt 組合檔案: {csvPath}")
 
-        promptDatadf = pd.read_csv(csvPath, encoding='utf-8-sig')
-        if 'promptID' not in promptDatadf.columns or 'promptText' not in promptDatadf.columns:
+        promptDataDf = pd.read_csv(csvPath, encoding='utf-8-sig')
+        if 'promptID' not in promptDataDf.columns or 'promptText' not in promptDataDf.columns:
             raise DataLoadError("Prompt CSV 缺少 'promptID' 或 'promptText' 欄位。")
 
-        promptCmbList = [PromptCmb(**row) for row in promptDatadf[['promptID', 'promptText']].to_dict('records')]
-        logging.info(f"[Loader] Prompt CSV 載入完成: {len(promptCmbList)} 筆 from {csvPath}")
-        return promptCmbList
+        promptList = [Prompt(**row) for row in promptDataDf[['promptID', 'promptText']].to_dict('records')]
+        logging.info(f"[Loader] Prompt CSV 載入完成: {len(promptList)} 筆 from {csvPath}")
+        return promptList
 
     def loadCompletedTaskRunIDs(self) -> Set[TaskRunID]:
         """
@@ -192,15 +193,15 @@ class ExperimentPipeline:
     # Step 2: Build
     # ==============================
 
-    def savePromptPreview(self, taskBatchList: List[TaskBatch], promptCmbList: List[PromptCmb]):
+    def savePromptPreview(self, taskBatchList: List[TaskBatch], promptList: List[Prompt]):
         """渲染所有 promptID × task 組合並存成 prompt_preview.csv 以供檢視。"""
         previewRecordList = []
-        for promptCmb in promptCmbList:
+        for prompt in promptList:
             for taskBatch in taskBatchList:
                 previewRecordList.append({
                     'taskID':     taskBatch.taskID,
-                    'promptID':   promptCmb.promptID,
-                    'sysPrompt':  promptCmb.promptText,
+                    'promptID':   prompt.promptID,
+                    'sysPrompt':  prompt.promptText,
                     'userPrompt': taskBatch.userPrompt,
                 })
 
@@ -210,7 +211,7 @@ class ExperimentPipeline:
 
     def buildPendingTasks(self,
         taskBatchList: List[TaskBatch],
-        promptCmbList: List[PromptCmb],
+        promptList: List[Prompt],
         completedTaskRunIDSet: Set[TaskRunID], ) -> List[LLMTask]:
         """
         TaskBatch × models × prompts 排列組合，跳過已完成的 TaskRunID，
@@ -218,16 +219,16 @@ class ExperimentPipeline:
         """
         if not self.config.selectedModels:
             raise TaskBuildError("config.selectedModels 為空，無可執行模型。")
-        if not promptCmbList:
+        if not promptList:
             raise TaskBuildError("Prompt 組合清單為空。")
 
         pendingTaskList: List[LLMTask] = []
         skippedCount = 0
 
         for modelName in self.config.selectedModels:
-            for promptCmb in promptCmbList:
+            for prompt in promptList:
                 for taskBatch in taskBatchList:
-                    taskRunID = TaskRunID(modelName, promptCmb.promptID, taskBatch.taskID)
+                    taskRunID = TaskRunID(modelName, prompt.promptID, taskBatch.taskID)
 
                     if taskRunID in completedTaskRunIDSet:
                         skippedCount += 1
@@ -236,8 +237,8 @@ class ExperimentPipeline:
                     pendingTaskList.append(LLMTask(
                         taskID=taskBatch.taskID,
                         model=modelName,
-                        promptID=promptCmb.promptID,
-                        sysPrompt=promptCmb.promptText,
+                        promptID=prompt.promptID,
+                        sysPrompt=prompt.promptText,
                         userPrompt=taskBatch.userPrompt,
                         pairs=taskBatch.pairList,
                         context=taskBatch.contextDict,
@@ -248,12 +249,31 @@ class ExperimentPipeline:
         logging.info(f"[Builder] 待執行任務: {len(pendingTaskList)} 筆")
         return pendingTaskList
 
+    def _validateLabelAlignment(self, taskBatchList: List[TaskBatch]) -> None:
+        """
+        在攤平後的 pairList 上做一次性對齊檢查，single / multi-target 共用同一條路徑。
+        任何 pair 的 'label' 對不到 labelSet.classes 即 fail-fast，避免錯誤組態浪費整輪 inference。
+        """
+        labelSet = self.config.labelSet
+        unknownSet = {
+            pair['label']
+            for batch in taskBatchList
+            for pair in batch.pairList
+            if 'label' in pair and labelSet.labelToCode(pair['label']) == -1
+        }
+        if unknownSet:
+            samplePreview = sorted(str(v) for v in unknownSet)[:10]
+            raise DataLoadError(
+                f"Task CSV 內共 {len(unknownSet)} 種 label 不在 labelSet={labelSet.classes} 中："
+                f"{samplePreview}。請檢查前處理輸出或 config 的 labelSet 是否一致（比對為去空白、大小寫不敏感）。"
+            )
+
     def _buildTaskBatches(self, taskDataDf: pd.DataFrame) -> List[TaskBatch]:
         """
         將 Task CSV 每列預處理成 TaskBatch（parse JSON、依 maxPairsPerBatch 切片、format userPrompt）。
         """
         maxPairsPerBatch = self.config.maxPairsPerBatch
-        isSingleTarget = self.config.isSingleTarget
+        b_isSingleTarget = self.config.b_isSingleTarget
         labelColumn = self.config.labelColumn
         taskBatchList: List[TaskBatch] = []
 
@@ -261,7 +281,7 @@ class ExperimentPipeline:
             baseTaskID = str(row['taskID'])
             taskContextDict: Dict[str, Any] = {col: row[col] for col in self.config.contextColumns}
 
-            if isSingleTarget:
+            if b_isSingleTarget:
                 allLabelPairList: List[Dict[str, Any]] = [{'label': row[labelColumn]}]
             else:
                 allLabelPairList = parsePairListField(row['pairs'], 'pairs', baseTaskID)

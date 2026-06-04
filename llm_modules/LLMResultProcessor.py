@@ -16,15 +16,15 @@ class LLMResultProcessor:
     _SYS_PROMPT_SUFFIX = '__sysPrompt'
     _RUN_KEY_SEPARATOR = '|'   # model 與 promptID 之間的分隔字元；'_' 會與模型名沖突，'|' 更醒目
     _CSV_KWARGS = {'index': False, 'encoding': 'utf-8-sig'}
-    _REQUIRED_COLS = ('itemID', 'model', 'promptID', 'predLabel', 'trueLabel')
+    _REQUIRED_COLS = ('sampleID', 'model', 'promptID', 'predLabel', 'trueLabel')
     _NON_INDEX_COLS = {'model', 'promptID', 'runKey', 'predLabel', 'rawOutput'}
 
     def __init__(self, parsedOutputCsvPath: Path, partialInfoCsvPath: Path, fullInfoCsvPath: Path = None,
-                 promptCmbList: List[Dict] = None, labelSet: Classification = None):
+                 promptList: List[Dict] = None, labelSet: Classification = None):
         self.parsedOutputCsvPath = Path(parsedOutputCsvPath)
         self.partialInfoCsvPath = Path(partialInfoCsvPath)
         self.fullInfoCsvPath = Path(fullInfoCsvPath) if fullInfoCsvPath else None
-        self.promptCmbList = promptCmbList or []
+        self.promptList = promptList or []
         self.labelSet = labelSet or Classification()
 
         self.inputDf = None
@@ -32,7 +32,7 @@ class LLMResultProcessor:
         self.fullDf = None
 
     def run(self) -> Path:
-        """主流程協調者：讀取 → 標準化 → Pivot → 存檔，回傳精簡版寬表格路徑。"""
+        """讀取 → 標準化 → Pivot → 存檔，回傳精簡版寬表格路徑。"""
         logging.info(f"[Processor] 啟動: {self.parsedOutputCsvPath}")
         self._loadData()
         self._prepareDf()
@@ -118,17 +118,17 @@ class LLMResultProcessor:
             raise PipelineError(f"Failed to save results: {e}") from e
 
     def _writePartialCsv(self) -> None:
-        """精簡版：itemID + trueLabel + 各 runKey 的 __pred 欄。"""
+        """精簡版：sampleID + trueLabel + 各 runKey 的 __pred 欄。"""
         predCols = [c for c in self.partialDf.columns if c.endswith(self._PRED_SUFFIX)]
-        leanCols = [c for c in ('itemID', 'trueLabel') if c in self.partialDf.columns] + predCols
+        leanCols = [c for c in ('sampleID', 'trueLabel') if c in self.partialDf.columns] + predCols
         self.partialDf[leanCols].to_csv(self.partialInfoCsvPath, **self._CSV_KWARGS)
 
     def _writeFullCsv(self) -> None:
         """完整版：補 {runKey}__sysPrompt 欄 → 欄位重排 → 寫檔。"""
-        # 補 {runKey}__sysPrompt 欄（promptCmbList 為空則跳過）
+        # 補 {runKey}__sysPrompt 欄（promptList 為空則跳過）
         sysPromptCols: List[str] = []
-        if self.promptCmbList:
-            promptIDToText = {p['promptID']: p['promptText'] for p in self.promptCmbList}
+        if self.promptList:
+            promptIDToText = {p['promptID']: p['promptText'] for p in self.promptList}
             runKeyIter = (self.inputDf[['model', 'promptID', 'runKey']]
                           .drop_duplicates()
                           .itertuples(index=False))
@@ -138,13 +138,13 @@ class LLMResultProcessor:
                 if colName not in sysPromptCols:
                     sysPromptCols.append(colName)
 
-        # 欄位重排：itemID → labels → __raw → __pred → __sysPrompt → 其他 index 欄
+        # 欄位重排：sampleID → labels → __raw → __pred → __sysPrompt → 其他 index 欄
         predCols = [c for c in self.fullDf.columns if c.endswith(self._PRED_SUFFIX)]
         rawCols = [c for c in self.fullDf.columns if c.endswith(self._RAW_SUFFIX)]
         indexCols = [c for c in self.fullDf.columns
                      if c not in predCols and c not in rawCols and c not in sysPromptCols]
         labelCols = [c for c in ('originalLabel', 'trueLabel') if c in indexCols]
-        idCols = [c for c in ('itemID',) if c in indexCols]
+        idCols = [c for c in ('sampleID',) if c in indexCols]
         otherIndexCols = [c for c in indexCols if c not in labelCols and c not in idCols]
         orderedCols = idCols + labelCols + rawCols + predCols + sysPromptCols + otherIndexCols
         self.fullDf[orderedCols].to_csv(self.fullInfoCsvPath, **self._CSV_KWARGS)

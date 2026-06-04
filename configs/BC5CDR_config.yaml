@@ -18,10 +18,7 @@ paths:
   promptPreviewPath:        "promptPreview.csv"
   evalDir:                  "eval"
 
-# --- 模型 ---
-selectedModels: ["llama3.2:1b"]
-maxPairsPerBatch: 10      # 每個 LLM task 包含的 item 數；1 = 單筆模式
-#ppI 固定是一
+
 # --- Prompt 模板 ---
 # contextColumns：Task CSV 中對應 taskTemplate 佔位符的欄位名稱
 contextColumns: ["title", "abstract"]
@@ -34,17 +31,20 @@ taskTemplate: |
 
   Pairs to analyze:
   {pairs}
-
+pairColumns: ["e1", "e2"] # pairColumns：pairs JSON 中對應 pairTemplate 佔位符的欄位名稱
+pairTemplate: |
+  {i}: Chemical: {e1} | Disease: {e2}
 # --- 分類設定 ---
 # 二元範例: ["True","False"]　多分類範例: ["negative","neutral","positive"]
 labelSet: ["no", "yes"]
+maxPairsPerBatch: 10      # 每個 LLM task 包含的 item 數
 
-# pairColumns：pairs JSON 中對應 pairTemplate 佔位符的欄位名稱
-pairColumns: ["e1", "e2"]
-pairTemplate: |
-  {i}: Chemical: {e1} | Disease: {e2}
+
+
+
 
 # --- Ollama 連線 ---
+selectedModels: ["llama3.2:1b"]
 ollamaServer:
   url:     "http://localhost:11434/api/chat"
   timeout: 600 #多久會停止等待 Ollama 回應（秒）
@@ -55,6 +55,7 @@ llmOptions:
   num_predict:    512
   num_ctx:        8192
   num_gpu:        99
+  repeat_penalty: 1.1  # 重複懲罰係數；>1 抑制重複輸出
 
 # --- 並發控制 ---
 concurrencyPerModel: 2 #每個模型同時處理多少個 task（不含 Ollama 內部的並發控制）

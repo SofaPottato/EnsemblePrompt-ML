@@ -2,6 +2,7 @@ import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.colors import ListedColormap
 import logging
 from pathlib import Path
 from sklearn.metrics import confusion_matrix, accuracy_score, precision_score, recall_score, f1_score, matthews_corrcoef
@@ -59,8 +60,8 @@ class PromptCmbEval:
 
         self.inputDf = pd.read_csv(str(self.partialInfoCsvPath))
 
-        self.idColNamesList = ['itemID']
-        self.predColNamesList = [col for col in self.inputDf.columns if col not in ('trueLabel', 'itemID')]
+        self.idColNamesList = ['sampleID']
+        self.predColNamesList = [col for col in self.inputDf.columns if col not in ('trueLabel', 'sampleID')]
 
         self.yTrueLabelSeries = self.inputDf['trueLabel']
         self.correctnessMatrixDf = pd.DataFrame(index=self.inputDf.index)
@@ -179,8 +180,8 @@ class PromptCmbEval:
         plt.figure(figsize=(12, 8))
         # 顯示時剝離 __pred 後綴；.T 轉置：模型放 Y 軸、樣本放 X 軸，符合閱讀直覺
         displayDf = self.correctnessMatrixDf.rename(columns=lambda c: c.removesuffix(self._PRED_SUFFIX))
-        sns.heatmap(displayDf.T, cmap="RdYlGn", cbar=True,
-                    cbar_kws={'label': 'Correct (1) / Incorrect (0)'})
+        sns.heatmap(displayDf.T, cmap=ListedColormap(["#d73027", "#1a9850"]),
+                    vmin=0, vmax=1, cbar=False)
         plt.title("Model Correctness Heatmap (Green=Correct)")
         plt.xlabel("Sample Index")
         plt.ylabel("Models")
@@ -192,7 +193,11 @@ class PromptCmbEval:
     def _saveResults(self):
         """輸出 evalSummary.csv（按 F1 排序）與 samplesToReview.csv（難題清單）。"""
         if self.metricsSummaryDf is not None:
-            self.metricsSummaryDf.to_csv(str(self.outputDirPath / "evalSummary.csv"), **self._CSV_KWARGS)
+            summaryDf = self.metricsSummaryDf.copy()
+            upperBoundRow = {col: "" for col in summaryDf.columns}
+            upperBoundRow["modelPromptID"] = f"upperBound: {self.upperBound:.2%}"
+            summaryDf = pd.concat([summaryDf, pd.DataFrame([upperBoundRow])], ignore_index=True)
+            summaryDf.to_csv(str(self.outputDirPath / "evalSummary.csv"), **self._CSV_KWARGS)
 
         if self.hardSamplesDf is not None:
             self.hardSamplesDf.to_csv(str(self.outputDirPath / "samplesToReview.csv"), **self._CSV_KWARGS)

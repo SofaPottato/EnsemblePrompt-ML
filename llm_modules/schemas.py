@@ -4,8 +4,8 @@ from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_valid
 from typing import Dict, Any, List, Optional, ClassVar, FrozenSet, TypeAlias
 
 
-# 任何處理 pair 的模組都應引用此常數，避免 'itemID'/'label' 硬編碼散落多處
-RESERVED_PAIR_FIELDS: FrozenSet[str] = frozenset({'itemID', 'label'})
+# 任何處理 pair 的模組都應引用此常數，避免 'sampleID'/'label' 硬編碼散落多處
+RESERVED_PAIR_FIELDS: FrozenSet[str] = frozenset({'sampleID', 'label'})
 
 
 # ── 語意化型別別名：純為提升可讀性與 IDE 提示，型別檢查器仍視為 str ──────────
@@ -15,7 +15,7 @@ TaskID:    TypeAlias = str   # Task 批次層級識別碼
 RawOutput: TypeAlias = str   # LLM 原始文字回應（未解析）
 
 
-# ── Config schema（依組合關係排序：葉子 → 容器）───────────────────────────────
+# ── Config schema（依組合關係排序）───────────────────────────────
 class PathsConfig(BaseModel):
     """
     路徑設定。輸出路徑未填時依 _DEFAULT_NAMES 衍生到 outputRoot；
@@ -105,13 +105,13 @@ class Classification(BaseModel):
             return -1
         return self._codeByLabel.get(str(label).strip().lower(), -1)
 
-    def buildResponseSchema(self, single: bool) -> Dict[str, Any]:
+    def buildResponseSchema(self, b_single: bool) -> Dict[str, Any]:
         """
         產生 Ollama `format` 用的 JSON schema。
-        single：單筆預測 {"label": <enum>}；batch：{"answers": [{"id": int, "label": <enum>}]}。
+        b_single：單筆預測 {"label": <enum>}；batch：{"answers": [{"id": int, "label": <enum>}]}。
         """
         labelProp = {"type": "string", "enum": self.classes}
-        if single:
+        if b_single:
             return {
                 "type": "object",
                 "properties": {"label": labelProp},
@@ -168,7 +168,7 @@ class LLMAppConfig(BaseModel):
     @model_validator(mode='after')
     def validateTargetMode(self):
         """single / multi-target 一致性檢查：必填欄位、禁用欄位、maxPairsPerBatch 限制。"""
-        if self.isSingleTarget:
+        if self.b_isSingleTarget:
             if not self.labelColumn:
                 raise ValueError(
                     "single-target 模式（pairColumns 為空）必須設定 labelColumn，"
@@ -192,18 +192,18 @@ class LLMAppConfig(BaseModel):
         return self
 
     @property
-    def isSingleTarget(self) -> bool:
+    def b_isSingleTarget(self) -> bool:
         """pairColumns 為空 → single-target；否則 multi-target。"""
         return not self.pairColumns
 
     def buildResponseSchema(self) -> Dict[str, Any]:
         """回傳 Ollama `format` JSON schema（single → {label}；batch → {answers:[{id,label}]}）。"""
-        return self.labelSet.buildResponseSchema(single=self.isSingleTarget)
+        return self.labelSet.buildResponseSchema(b_single=self.b_isSingleTarget)
 
 
 # ── Pipeline 例外體系 ─────────────────────────────────────────────────────
 class PipelineError(Exception):
-    """所有 Pipeline 錯誤的基底類別，call_LLM.py 統一捕捉。"""
+    """所有 Pipeline 錯誤的基底類別，Main_PromptCmb.py 統一捕捉。"""
     pass
 
 class DataLoadError(PipelineError):
@@ -234,5 +234,5 @@ class LLMTask(BaseModel):
     promptID:  PromptID  = Field(..., min_length=1, description="Prompt 策略識別碼")
     sysPrompt: str       = Field(default="", description="系統提示詞")
     userPrompt: str      = Field(..., min_length=1, description="使用者提示詞")
-    pairs: List[Dict[str, Any]] = Field(default_factory=list, description="此任務包含的 pair 清單（含 itemID/label）")
+    pairs: List[Dict[str, Any]] = Field(default_factory=list, description="此任務包含的 pair 清單（含 sampleID/label）")
     context: Dict[str, Any] = Field(default_factory=dict, description="Task 層級 context 欄位")
