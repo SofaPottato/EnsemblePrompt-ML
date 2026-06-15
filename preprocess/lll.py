@@ -1,11 +1,11 @@
 """
 LLL 資料集前處理腳本。
-將 LLL-test.csv 轉為標準 Task CSV 格式（single-target），供 Pipeline 使用。
+將 LLL-test.csv 轉為標準 Task CSV 格式（PPI），供 Pipeline 使用。
 
 LLL 原始欄位：
   - docid, isValid, passage, passageid
 
-標準 Task CSV 欄位（輸出，single-target 格式）：
+標準 Task CSV 欄位（輸出，PPI 格式）：
   - taskID:  唯一識別碼，使用 passageid + row index
   - passage: 單句文本（對應 taskTemplate 的 {passage} 佔位符）
   - label:   true label 字串（對應 config.labelColumn，由 Pipeline 自動包成 pairs）
@@ -18,8 +18,8 @@ import logging
 import pandas as pd
 from pathlib import Path
 
-INPUT_PATH  = "data/PPI/LLL-train.csv"
-OUTPUT_PATH = "data/PPI/LLL/LLL-tasks.csv"
+INPUT_PATH  = "data\PPI\IEPA-test.csv"
+OUTPUT_PATH = "data\PPI\IEPA\IEPA_test.csv"
 
 
 def preprocess():

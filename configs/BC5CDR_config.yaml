@@ -31,11 +31,13 @@ taskTemplate: |
 
   Pairs to analyze:
   {pairs}
-pairColumns: ["e1", "e2"] # pairColumns：pairs JSON 中對應 pairTemplate 佔位符的欄位名稱
+
+pairColumns: ["e1", "e2"]
 pairTemplate: |
   {i}: Chemical: {e1} | Disease: {e2}
 # --- 分類設定 ---
 # 二元範例: ["True","False"]　多分類範例: ["negative","neutral","positive"]
+taskType: "BC5CDR"        # 推論模式：'PPI'或 'BC5CDR'
 labelSet: ["no", "yes"]
 maxPairsPerBatch: 10      # 每個 LLM task 包含的 item 數
 

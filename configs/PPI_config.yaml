@@ -27,12 +27,12 @@ taskTemplate: |
 
   Task: Based on the sentence, do PROTEIN1 and PROTEIN2 have a protein-protein interaction (PPI)?
   Answer with exactly one of the allowed labels: no, yes.
-pairColumns: []          # 多目標模式下的欄位對清單；single-target 時留空
+taskType: "PPI"          # 推論模式：'PPI'或 'BC5CDR'
 # --- 分類設定 ---
 # 清單索引即整數 code（no=0, yes=1）；gold label 對齊由前處理負責。
 # 二元範例: ["no","yes"]　多分類範例: ["negative","neutral","positive"]
 labelSet: ["no", "yes"]
-# single-target 模式：pairColumns 空 + 指定 labelColumn
+# PPI 模式：pairColumns 空 + 指定 labelColumn
 # Pipeline 會把 Task CSV 的 label 欄位自動包成 pairs，供下游統一處理
 maxPairsPerBatch: 1              # 每批次送入模型的最大樣本對數
 

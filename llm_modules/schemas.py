@@ -4,8 +4,11 @@ from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_valid
 from typing import Dict, Any, List, Optional, ClassVar, FrozenSet, TypeAlias
 
 
-# 任何處理 pair 的模組都應引用此常數，避免 'sampleID'/'label' 硬編碼散落多處
-RESERVED_PAIR_FIELDS: FrozenSet[str] = frozenset({'sampleID', 'label'})
+# 任何處理 pair 的模組都應引用此常數，避免 'sentID'/'label' 硬編碼散落多處
+# sentID = sentenceID（樣本識別碼；PPI 為句子，BC5CDR 為 entity-pair）
+# 集中一處的好處：PromptFormatter（決定哪些欄進 prompt）與 OutputParser（哪些是核心欄）
+# 共用同一定義，新增內部欄位只改這裡。
+RESERVED_PAIR_FIELDS: FrozenSet[str] = frozenset({'sentID', 'label'})
 
 
 # ── 語意化型別別名：純為提升可讀性與 IDE 提示，型別檢查器仍視為 str ──────────
@@ -33,6 +36,7 @@ class PathsConfig(BaseModel):
     evalDir:                  Optional[Path] = Field(default=None, description="評估圖表與報表的輸出目錄")
     promptPreviewPath:        Optional[Path] = Field(default=None, description="渲染後的 userPrompt 預覽 CSV 路徑")
 
+    # 各輸出路徑留 None 時的預設檔名；ClassVar 表示這是類別常數、非 model 欄位。
     _DEFAULT_NAMES: ClassVar[Dict[str, str]] = {
         'rawOutputPath':            'raw.csv',
         'resultPath':               'result.csv',
@@ -46,6 +50,8 @@ class PathsConfig(BaseModel):
     @model_validator(mode='after')
     def resolveAndEnsureDirectories(self):
         """依 outputRoot 解析所有輸出路徑（None/相對/絕對三種情形），並統一 mkdir。"""
+        # 三種情形統一解析：None → 套預設檔名；相對路徑 → 接到 outputRoot 下；絕對路徑 → 原樣。
+        # 在 config 載入時就 resolve 完，下游拿到的路徑一律是絕對且可直接用。
         for name, default in self._DEFAULT_NAMES.items():
             current: Optional[Path] = getattr(self, name)
             if current is None:
@@ -56,6 +62,8 @@ class PathsConfig(BaseModel):
                 resolved = current
             setattr(self, name, resolved)
 
+        # 統一在這裡把所有父目錄建好，下游各階段就「只管寫檔」，不必各自 mkdir。
+        # 'Dir' 結尾或 outputRoot 本身當目錄建；其餘是檔案路徑，建它的 parent。
         for fieldName in self.model_fields:
             value = getattr(self, fieldName)
             if isinstance(value, Path):
@@ -73,20 +81,23 @@ class OllamaServerConfig(BaseModel):
 
 class Classification(BaseModel):
     """
-    分類類別設定。classes 在清單中的索引即為整數標籤 code（0..N-1），未命中一律 -1。
+    分類類別設定。classes 在清單中的索引即為整數標籤 labelCode（0..N-1），未命中一律 -1。
     Ollama `format` JSON schema 由此產生，強制模型只能輸出 classes 之一。
     gold label 與 classes 的對齊由前處理負責，須完全一致（比對時大小寫不敏感、去空白）。
     """
     classes: List[str] = Field(
         default_factory=lambda: ["no", "yes"],
-        description="分類類別清單；索引即整數 code。二元 [no,yes] 或多分類 [negative,neutral,positive]"
+        description="分類類別清單；索引即整數 labelCode。二元 [no,yes] 或多分類 [negative,neutral,positive]"
     )
 
-    _codeByLabel: Dict[str, int] = PrivateAttr(default_factory=dict)
+    # 預建的 label→labelCode 對照表（小寫為 key）。PrivateAttr：不是對外欄位、不進序列化，只是查表加速。
+    _labelCodeByLabel: Dict[str, int] = PrivateAttr(default_factory=dict)
 
     @model_validator(mode='after')
     def validateAndIndexClasses(self):
-        """去空白、檢查非空 / 不重複（大小寫不敏感）/ 至少 2 類，並預建 label→code 對照表。"""
+        """去空白、檢查非空 / 不重複（大小寫不敏感）/ 至少 2 類，並預建 label→labelCode 對照表。"""
+        # 先去空白，再做三項健全性檢查：空字串、大小寫不敏感重複、至少 2 類——
+        # 這些都是會讓 labelCode 對應出錯卻不易察覺的設定問題，故在載入期就擋下。
         cleaned = [str(c).strip() for c in self.classes]
         if any(not c for c in cleaned):
             raise ValueError("labelSet 不可包含空字串。")
@@ -96,20 +107,25 @@ class Classification(BaseModel):
         if len(cleaned) < 2:
             raise ValueError(f"labelSet 至少需 2 個類別，目前: {self.classes}")
         self.classes = cleaned
-        self._codeByLabel = {c.lower(): i for i, c in enumerate(cleaned)}
+        # 一次建好對照表（小寫 key），labelToLabelCode 就能 O(1) 查，不必每次線性掃 classes。
+        self._labelCodeByLabel = {c.lower(): i for i, c in enumerate(cleaned)}
         return self
 
-    def labelToCode(self, label: Any) -> int:
-        """字串標籤 → 索引 code；大小寫不敏感、去空白；未命中回 -1。"""
+    def labelToLabelCode(self, label: Any) -> int:
+        """字串標籤 → 索引 labelCode；大小寫不敏感、去空白；未命中回 -1。"""
+        # None 直接 -1，避免對 None 做字串操作。其餘一律去空白+小寫後查表，未命中（含拼錯、
+        # 多餘空白外的差異）回 -1——「無法判定」的統一表示，下游據此排除。
         if label is None:
             return -1
-        return self._codeByLabel.get(str(label).strip().lower(), -1)
+        return self._labelCodeByLabel.get(str(label).strip().lower(), -1)
 
     def buildResponseSchema(self, b_single: bool) -> Dict[str, Any]:
         """
         產生 Ollama `format` 用的 JSON schema。
         b_single：單筆預測 {"label": <enum>}；batch：{"answers": [{"id": int, "label": <enum>}]}。
         """
+        # 用 enum 把 label 限定成 classes 之一：Ollama 端就會強制模型只輸出這些字串，
+        # 大幅減少 OutputParser 要處理的雜訊（少數不遵守的仍由 labelToLabelCode 兜底回 -1）。
         labelProp = {"type": "string", "enum": self.classes}
         if b_single:
             return {
@@ -117,6 +133,7 @@ class Classification(BaseModel):
                 "properties": {"label": labelProp},
                 "required": ["label"],
             }
+        # batch：要求每筆帶 id（1-based 序號），讓 OutputParser 能把答案對回正確的 pair。
         return {
             "type": "object",
             "properties": {
@@ -136,17 +153,18 @@ class Classification(BaseModel):
 class LLMAppConfig(BaseModel):
     """
     Pipeline 設定 Schema。
-    single-target（pairColumns 為空）：每個 task 一個預測標的，需設 labelColumn。
-    multi-target（pairColumns 非空）：每個 task 多個預測標的，需設 pairTemplate。
+    taskType="PPI"：每個 task 一個預測標的，需設 labelColumn。
+    taskType="BC5CDR"：每個 task 多個預測標的，需設 pairTemplate。
     """
     paths: PathsConfig
+    taskType: str = Field(..., description="資料集類型，決定推論模式：'PPI' 或 'BC5CDR'")
     selectedModels: List[str] = Field(default_factory=list, description="要進行測試的 LLM 模型清單")
     contextColumns: List[str] = Field(default_factory=list, description="Task CSV 中作為 context 的欄位名稱")
-    pairColumns: List[str] = Field(default_factory=list, description="pairs JSON 中對應 pairTemplate 佔位符的欄位名稱；為空代表 single-target 模式")
-    labelColumn: Optional[str] = Field(default=None, description="single-target 模式下攜帶 true label 的欄位名")
+    pairColumns: List[str] = Field(default_factory=list, description="pairs JSON 中對應 pairTemplate 佔位符的欄位名稱")
+    labelColumn: Optional[str] = Field(default=None, description="PPI 模式下攜帶 true label 的欄位名")
     ollamaServer: OllamaServerConfig = Field(default_factory=OllamaServerConfig)
     llmOptions: Dict[str, Any] = Field(default_factory=lambda: {"temperature": 0}, description="LLM 推論參數")
-    labelSet: Classification = Field(default_factory=Classification, description="分類類別清單（字串陣列，如 ['no','yes']）；索引即整數 code")
+    labelSet: Classification = Field(default_factory=Classification, description="分類類別清單（字串陣列，如 ['no','yes']）；索引即整數 labelCode")
     maxPairsPerBatch: int = Field(default=1, description="每個 LLM task 包含的 item 數；>1 為批次模式")
     concurrencyPerModel: int = Field(default=8, description="每個模型的最大非同步併發數")
     maxConcurrentModels: int = Field(default=1, description="最大同時運行的模型數量")
@@ -157,6 +175,8 @@ class LLMAppConfig(BaseModel):
     @classmethod
     def _coerceLabelSet(cls, v):
         """labelSet 寫成字串清單（如 ['no','yes']），於此包成 Classification。"""
+        # ergonomic helper：讓 YAML 直接寫 labelSet: ["no","yes"]（而非 labelSet: {classes: [...]}）。
+        # mode='before' 表示在 Pydantic 驗 Classification 之前先攔截、把 list 包成 {'classes': list}。
         if isinstance(v, Classification):
             return v
         if not isinstance(v, list):
@@ -166,42 +186,52 @@ class LLMAppConfig(BaseModel):
         return {'classes': v}
 
     @model_validator(mode='after')
-    def validateTargetMode(self):
-        """single / multi-target 一致性檢查：必填欄位、禁用欄位、maxPairsPerBatch 限制。"""
-        if self.b_isSingleTarget:
+    def validateTaskMode(self):
+        """taskType 一致性檢查：必填欄位、禁用欄位、maxPairsPerBatch 限制。"""
+        # 這裡是 taskType 的合法值把關點：通過後，下游（loadTaskData / _buildTaskBatches）就能信任
+        # taskType ∈ {PPI, BC5CDR}，PPI 以外一律當 BC5CDR，不必再寫不可達的第三分支。
+        if self.taskType not in ("PPI", "BC5CDR"):
+            raise ValueError(
+                f"taskType 必須為 'PPI' 或 'BC5CDR'，收到 '{self.taskType}'。"
+            )
+        if self.taskType == "PPI":
+            # PPI 三條硬規則：
+            #  - 必須有 labelColumn（gold label 的來源欄）。
+            #  - 不該有 pairTemplate（PPI 沒有 pair 概念，設了代表用錯模式）。
+            #  - maxPairsPerBatch 必為 1（強加 batch 概念只會讓下游邏輯複雜化卻無收益）。
             if not self.labelColumn:
                 raise ValueError(
-                    "single-target 模式（pairColumns 為空）必須設定 labelColumn，"
+                    "PPI 模式必須設定 labelColumn，"
                     "用於指定 Task CSV 中攜帶 true label 的欄位名。"
                 )
             if self.pairTemplate is not None:
                 raise ValueError(
-                    "single-target 模式（pairColumns 為空）不應設定 pairTemplate。"
-                    "若資料集為一篇多 pair，請設定 pairColumns。"
+                    "PPI 模式不應設定 pairTemplate。"
+                    "若資料集為一篇多 pair，請將 taskType 改為 'BC5CDR' 並設定 pairColumns。"
                 )
             if self.maxPairsPerBatch != 1:
                 raise ValueError(
-                    f"single-target 模式下 maxPairsPerBatch 必須為 1，目前為 {self.maxPairsPerBatch}。"
+                    f"PPI 模式下 maxPairsPerBatch 必須為 1，目前為 {self.maxPairsPerBatch}。"
                 )
         else:
+            # BC5CDR：一定要有 pairTemplate，否則 pair 無法渲染進 userPrompt。
             if not self.pairTemplate:
                 raise ValueError(
-                    "multi-target 模式（pairColumns 非空）必須提供 pairTemplate，"
+                    "BC5CDR 模式必須提供 pairTemplate，"
                     "否則無法將 pair 渲染進 userPrompt。"
                 )
         return self
 
-    @property
-    def b_isSingleTarget(self) -> bool:
-        """pairColumns 為空 → single-target；否則 multi-target。"""
-        return not self.pairColumns
-
     def buildResponseSchema(self) -> Dict[str, Any]:
-        """回傳 Ollama `format` JSON schema（single → {label}；batch → {answers:[{id,label}]}）。"""
-        return self.labelSet.buildResponseSchema(b_single=self.b_isSingleTarget)
+        """回傳 Ollama `format` JSON schema（PPI → {label}；BC5CDR → {answers:[{id,label}]}）。"""
+        # facade：把「模式判定」與「schema 產生」綁在一起，LLMEngine 直接拿結果丟給 Ollama。
+        # b_single 即「是否為 PPI（單標的）」。
+        return self.labelSet.buildResponseSchema(b_single=(self.taskType == "PPI"))
 
 
 # ── Pipeline 例外體系 ─────────────────────────────────────────────────────
+# 階層化例外：上層（Main_PromptCmb）可「捕 PipelineError 一網打盡」也可分別處理；
+# 各階段內部明確 raise 對應子類，讓 traceback 一眼看出失敗在哪一步。
 class PipelineError(Exception):
     """所有 Pipeline 錯誤的基底類別，Main_PromptCmb.py 統一捕捉。"""
     pass
@@ -229,10 +259,12 @@ class LLMTask(BaseModel):
     一次 LLM API 呼叫的輸入結構。
     唯一性由 composite key (model, promptID, taskID) 保證，不用字串拼接以避免特殊字元歧義。
     """
+    # min_length=1：三個 ID 與 userPrompt 不可空（空字串會讓 checkpoint 比對與渲染出問題）。
+    # sysPrompt 可空（允許「全部塞 user」的 prompt 設計）。
     taskID:    TaskID    = Field(..., min_length=1, description="批次層級識別碼")
     model:     ModelName = Field(..., min_length=1, description="Ollama 模型名稱")
     promptID:  PromptID  = Field(..., min_length=1, description="Prompt 策略識別碼")
     sysPrompt: str       = Field(default="", description="系統提示詞")
     userPrompt: str      = Field(..., min_length=1, description="使用者提示詞")
-    pairs: List[Dict[str, Any]] = Field(default_factory=list, description="此任務包含的 pair 清單（含 sampleID/label）")
+    pairs: List[Dict[str, Any]] = Field(default_factory=list, description="此任務包含的 pair 清單（含 sentID/label）")
     context: Dict[str, Any] = Field(default_factory=dict, description="Task 層級 context 欄位")

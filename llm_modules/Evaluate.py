@@ -18,15 +18,16 @@ class PromptCmbEval:
     """
 
     _CSV_KWARGS = {'index': False, 'encoding': 'utf-8-sig'}
-    _PRED_SUFFIX = '__pred'   # 對齊 LLMResultProcessor._PRED_SUFFIX，用於顯示時剝離
+    _PRED_SUFFIX = '__pred'   
 
     def __init__(self, partialInfoCsvPath: Path, outputDirPath: Path = Path("./output"),
                  labelSet: Classification = None):
-        # I/O 延後到 run()，避免 import 期觸發 I/O 副作用
+
         self.partialInfoCsvPath = Path(partialInfoCsvPath)
         self.outputDirPath = Path(outputDirPath)
         self.plotsDirPath = self.outputDirPath / "plots"
 
+        # _validLabels = [0..N-1]，即「有效預測」的值域；用來把 -1（無法解析）從指標中濾掉。
         cfg = labelSet or Classification()
         self.classes = cfg.classes
         self._validLabels = list(range(len(self.classes)))
@@ -60,8 +61,8 @@ class PromptCmbEval:
 
         self.inputDf = pd.read_csv(str(self.partialInfoCsvPath))
 
-        self.idColNamesList = ['sampleID']
-        self.predColNamesList = [col for col in self.inputDf.columns if col not in ('trueLabel', 'sampleID')]
+        self.idColNamesList = ['sentID']
+        self.predColNamesList = [col for col in self.inputDf.columns if col not in ('trueLabel', 'sentID')]
 
         self.yTrueLabelSeries = self.inputDf['trueLabel']
         self.correctnessMatrixDf = pd.DataFrame(index=self.inputDf.index)
@@ -76,12 +77,19 @@ class PromptCmbEval:
     def _evalAllPredCols(self):
         """
         遍歷所有預測欄，計算指標並記錄每個樣本的對錯矩陣。
-        指標計算只用有效預測（predLabel ∈ {0,1}）；對錯矩陣用全體樣本（含 -1，-1 一律判錯）。
+        指標計算只用有效預測（predLabel ∈ classes 索引 0..N-1）；對錯矩陣用全體樣本（含 -1，-1 一律判錯）。
         """
+        # 二元任務的 P/R/F1 固定以 labelCode 1（classes[1]）為正類（sklearn average='binary'）。
+        # 明示正類，labelSet 順序若被手誤翻轉（如 ['yes','no']），這行 log 會顯示正類變成 'no'，肉眼可擋。
+        if len(self.classes) == 2:
+            logging.info(f"[Eval] 正類 = '{self.classes[1]}'；負類 = '{self.classes[0]}' ")
+
+        correctnessCols = {}
         for predColName in self.predColNamesList:
+            # 指標只用有效預測：整欄都 -1（該 runKey 全解析失敗）→ getValidPair 回 None，跳過指標。
             validLabelsTuple = self._getValidPair(predColName)
             if validLabelsTuple is None:
-                logging.warning(f"[Eval] 跳過 {predColName}: 無有效預測 (predLabel ∉ {{0,1}})")
+                logging.warning(f"[Eval] 跳過 {predColName}: 無有效預測 (predLabel ∉ classes 索引 0..N-1)")
                 continue
             trueValidSeries, predValidSeries = validLabelsTuple
 
@@ -92,8 +100,10 @@ class PromptCmbEval:
                 resultRowDict["validCount"] = len(trueValidSeries)
                 self.metricsResultsList.append(resultRowDict)
 
-            # 對錯矩陣含 -1：-1 vs 任何值都為 False，使難題定義不依賴解析成功率
-            self.correctnessMatrixDf[predColName] = (self.inputDf[predColName] == self.yTrueLabelSeries).astype(int)
+            correctnessCols[predColName] = (self.inputDf[predColName] == self.yTrueLabelSeries).astype(int)
+
+        if correctnessCols:
+            self.correctnessMatrixDf = pd.DataFrame(correctnessCols, index=self.inputDf.index)
 
         if self.metricsResultsList:
             self.metricsSummaryDf = pd.DataFrame(self.metricsResultsList).sort_values('f1Score', ascending=False)
@@ -109,7 +119,6 @@ class PromptCmbEval:
         """
         if len(trueLabelSeries) == 0:
             return None
-
         avg = 'binary' if len(self.classes) == 2 else 'macro'
         metricsDict = {
             "accuracy":  accuracy_score(trueLabelSeries, predLabelSeries),
@@ -130,13 +139,16 @@ class PromptCmbEval:
             logging.warning("[Eval] correctness matrix 為空，跳過難題分析")
             return
 
+        # 難題 = 對錯矩陣某列「橫向加總 == 0」的樣本，即沒有任何 runKey 答對它。
         correctCountsSeries = self.correctnessMatrixDf.sum(axis=1)
         hardSampleIndexList = correctCountsSeries[correctCountsSeries == 0].index
 
+        # 難題清單只留 sentID + trueLabel，給人工覆檢用（available 過濾避免欄位不存在時 KeyError）。
         reviewColNamesList = self.idColNamesList + ['trueLabel']
         availableReviewColNamesList = [c for c in reviewColNamesList if c in self.inputDf.columns]
         self.hardSamplesDf = self.inputDf.loc[hardSampleIndexList, availableReviewColNamesList]
 
+        # Upper Bound = 非難題比例：代表準確率天花板。
         totalSampleCount = len(self.inputDf)
         solvableSampleCount = totalSampleCount - len(self.hardSamplesDf)
         self.upperBound = solvableSampleCount / totalSampleCount if totalSampleCount > 0 else 0
@@ -157,6 +169,7 @@ class PromptCmbEval:
             # labels=_validLabels 確保即使某類別無預測，矩陣仍為 N×N
             confusionMatrixArr = confusion_matrix(yTrueValidSeries, yPredValidSeries, labels=self._validLabels)
 
+            # 圖大小隨類別數縮放，避免多分類時格子擠成一團
             plt.figure(figsize=(max(6, len(self.classes) * 2), max(5, len(self.classes) * 1.6)))
             sns.heatmap(confusionMatrixArr, annot=True, fmt='d', cmap='Blues', cbar=False,
                         xticklabels=[f'Pred: {c}' for c in self.classes],
@@ -178,7 +191,7 @@ class PromptCmbEval:
 
         logging.info("[Eval] 繪製對錯熱圖中")
         plt.figure(figsize=(12, 8))
-        # 顯示時剝離 __pred 後綴；.T 轉置：模型放 Y 軸、樣本放 X 軸，符合閱讀直覺
+
         displayDf = self.correctnessMatrixDf.rename(columns=lambda c: c.removesuffix(self._PRED_SUFFIX))
         sns.heatmap(displayDf.T, cmap=ListedColormap(["#d73027", "#1a9850"]),
                     vmin=0, vmax=1, cbar=False)
@@ -193,6 +206,7 @@ class PromptCmbEval:
     def _saveResults(self):
         """輸出 evalSummary.csv（按 F1 排序）與 samplesToReview.csv（難題清單）。"""
         if self.metricsSummaryDf is not None:
+            # 在 summary 末尾附一列 upperBound：把「天花板」與各組合指標放同一張表方便對照。
             summaryDf = self.metricsSummaryDf.copy()
             upperBoundRow = {col: "" for col in summaryDf.columns}
             upperBoundRow["modelPromptID"] = f"upperBound: {self.upperBound:.2%}"
@@ -208,6 +222,8 @@ class PromptCmbEval:
 
     def _getValidPair(self, col: str):
         """回傳 (yTrueValidSeries, yPredValidSeries)，若無有效預測（值不在 classes 索引）則 None。"""
+        # 用 isin(_validLabels) 做遮罩濾掉 -1：同時套用到 true 與 pred，確保兩邊對齊同一批樣本。
+        # 整欄都無效（全 -1）→ 回 None，呼叫端據此跳過該 runKey 的指標/繪圖。
         yPredSeries = self.inputDf[col]
         validMaskSeries = yPredSeries.isin(self._validLabels)
         if validMaskSeries.sum() == 0:
