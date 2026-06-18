@@ -36,7 +36,7 @@ flowchart TD
     %% 進入點
     Entry["<b>Main_PromptCmb.py</b><br/>--config xxx.yaml<br/>exit 0 / 1"]
     Pipeline["<b>ExperimentPipeline</b><br/>llm_modules/Pipeline.py<br/>六階段流程統籌"]
-    Entry -->|"載入並驗證 LLMAppConfig"| Pipeline
+    Entry -->|"載入並驗證 PipelineConfig"| Pipeline
 
     %% 輸入
     subgraph Inputs["輸入"]
@@ -76,7 +76,7 @@ flowchart TD
     S6 -.產出.-> O6
 
     %% 支援模組
-    Support["<b>支援模組</b><br/>schemas.py — Pydantic config / PipelineError / LLMTask / Classification<br/>utils.py — logger / seed / YAML / JSON 寬鬆解析"]
+    Support["<b>支援模組</b><br/>schemas.py — Pydantic config / PipelineError / LLMTask / LabelSet<br/>utils.py — logger / seed / YAML / JSON 寬鬆解析"]
     Pipeline -.依賴.-> Support
 
     %% 樣式
@@ -191,7 +191,7 @@ prompts:
 
 ## PPI vs BC5CDR
 
-整個 config 的行為由 `taskType`（`"PPI"` / `"BC5CDR"`）決定，並由 [LLMAppConfig.validateTaskMode](llm_modules/schemas.py#L189) 強制檢查：
+整個 config 的行為由 `taskType`（`"PPI"` / `"BC5CDR"`）決定，並由 [PipelineConfig.validateTaskMode](llm_modules/schemas.py#L189) 強制檢查：
 
 | 比較項 | PPI | BC5CDR |
 |---|---|---|
@@ -226,7 +226,7 @@ prompts:
 
 ## Label 編碼
 
-[Classification](llm_modules/schemas.py#L82) 是標籤對應的單一事實來源：
+[LabelSet](llm_modules/schemas.py#L80) 是標籤對應的單一事實來源：
 
 - `classes` 清單**索引**即整數 code（`["no","yes"]` → no=0, yes=1）。
 - `labelToLabelCode` 比對時去空白、大小寫不敏感；未命中一律回 `-1`。
@@ -242,7 +242,7 @@ prompts:
 - 推論完成的每筆任務由 [LLMEngine._appendCsv](llm_modules/OllamaEngine.py#L214) 以 `asyncio.Lock` 序列化 append、`flush()+fsync()` 落盤。
 - 重跑時 [Pipeline.loadCompletedTaskRunIDs](llm_modules/Pipeline.py#L167) 重建已完成集合，`buildPendingTasks` 過濾掉這些，不需要任何旗標。
 - API 失敗（重試 3 次仍失敗）會寫入 `"Error: ..."` 而非 raise；該列**仍算已完成**，下游 `OutputParser` 看到後將該位置標 `-1`。
-- 若改動 `raw.csv` 欄位，必須同步更新 [RAW_CSV_SCHEMA](llm_modules/OllamaEngine.py#L17) 與 `TASK_RUN_ID_COLUMNS`；不一致時讀取會拋 `DataLoadError`，必須刪除或備份舊檔再跑。
+- 若改動 `raw.csv` 欄位，必須同步更新 [RAW_CSV_COLS](llm_modules/OllamaEngine.py#L19) 與 `TASK_RUN_ID_COLUMNS`；不一致時讀取會拋 `DataLoadError`，必須刪除或備份舊檔再跑。
 
 ## 併發模型
 
@@ -257,7 +257,7 @@ prompts:
 
 | 路徑（相對 `outputRoot`） | 內容 |
 |---|---|
-| `raw.csv` | 推論原始紀錄（append-only checkpoint）；欄位 = `RAW_CSV_SCHEMA` |
+| `raw.csv` | 推論原始紀錄（append-only checkpoint）；欄位 = `RAW_CSV_COLS` |
 | `result.csv` | 長表，每個 pair × `(model, promptID)` 一列；`predLabel` ∈ {-1, 0..N-1} |
 | `singleOutput/{promptID}_result.csv` | 同上但依 `promptID` 切分 |
 | `partialInfo.csv` | 寬表，一列一樣本；欄位包含 `sentID`, `trueLabel`, 各 `model|promptID__pred` |

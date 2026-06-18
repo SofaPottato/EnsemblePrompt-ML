@@ -10,14 +10,14 @@ from pathlib import Path
 # ==========================================
 class PromptConfig:
     @staticmethod
-    def loadConfig(configPath="promptGenerate\prompt_config.yaml"):
+    def loadYaml(configPath="promptGenerate\prompt_config.yaml"):
         if not os.path.exists(configPath):
             raise FileNotFoundError(f"找不到設定檔: {configPath}")
         with open(configPath, 'r', encoding='utf-8') as f:
             return yaml.safe_load(f)
 
     @staticmethod
-    def loadYaml(yamlPath):
+    def loadMethodPool(yamlPath):
         if not os.path.exists(yamlPath):
             logging.error(f"找不到檔案: {yamlPath}")
             raise FileNotFoundError(f"找不到檔案: {yamlPath}")
@@ -38,10 +38,10 @@ class PromptConfig:
             logging.warning(f"YAML 'prompts' 欄位為空: {yamlPath}")
             return {}
 
-        emptyKeys = [k for k, v in result.items() if not isinstance(v, dict)]
-        if emptyKeys:
-            print(f"以下 method 內容為空，已略過: {emptyKeys}")
-            logging.warning(f"略過空 method: {emptyKeys}")
+        emptyKeyList = [k for k, v in result.items() if not isinstance(v, dict)]
+        if emptyKeyList:
+            print(f"以下 method 內容為空，已略過: {emptyKeyList}")
+            logging.warning(f"略過空 method: {emptyKeyList}")
             result = {k: v for k, v in result.items() if isinstance(v, dict)}
 
         return result
@@ -57,13 +57,13 @@ class PromptConfig:
 # 負責核心的 Prompt 生成邏輯
 # ==========================================
 class PromptGenerator:
-    def __init__(self, methodPoolDict, configDict):
+    def __init__(self, methodPoolDict, config):
         self.methodPoolDict = methodPoolDict
-        self.cfgDict = configDict
+        self.config = config
         self.generatedPromptList = []
 
     def generate(self):
-        b_isExhaustiveCmb = self.cfgDict.get('b_isExhaustiveCmb', True)
+        b_isExhaustiveCmb = self.config.get('b_isExhaustiveCmb', True)
         modeName = 'AUTO (Exhaustive)' if b_isExhaustiveCmb else 'MANUAL'
         logging.info(f"Prompt Generation Mode: {modeName}")
 
@@ -77,14 +77,14 @@ class PromptGenerator:
         return self.generatedPromptList
 
     def sortResults(self):
-        methodOrder = list(self.methodPoolDict.keys())
-        sortedMethods = sorted(methodOrder, key=len, reverse=True)
+        methodOrderList = list(self.methodPoolDict.keys())
+        sortedMethodList = sorted(methodOrderList, key=len, reverse=True)
 
-        def parsePartId(partStr):
-            for method in sortedMethods:
-                if partStr.startswith(method):
-                    methodIdx = methodOrder.index(method)
-                    itemIdx = int(partStr[len(method):])
+        def parsePartId(part):
+            for method in sortedMethodList:
+                if part.startswith(method):
+                    methodIdx = methodOrderList.index(method)
+                    itemIdx = int(part[len(method):])
                     return (methodIdx, itemIdx)
             return (999, 999)
 
@@ -98,15 +98,15 @@ class PromptGenerator:
             logging.warning(f"排序時發生錯誤，跳過排序: {e}")
 
     def generateAutoMode(self):
-        settingsDict = self.cfgDict.get('autoSettings', {})
-        methodsList = settingsDict.get('selectedMethods', list(self.methodPoolDict.keys()))
+        autoSettingsDict = self.config.get('autoSettings', {})
+        methodsList = autoSettingsDict.get('selectedMethods', list(self.methodPoolDict.keys()))
         if methodsList == ['ALLMethod']:
             targetMethodList = list(self.methodPoolDict.keys())
         else:
-            invalidMethods = [m for m in methodsList if m not in self.methodPoolDict]
-            if invalidMethods:
-                print(f"以下 method 在 YAML 中找不到，將跳過: {invalidMethods}")
-                logging.warning(f"無效 method: {invalidMethods}")
+            invalidMethodList = [m for m in methodsList if m not in self.methodPoolDict]
+            if invalidMethodList:
+                print(f"以下 method 在 YAML 中找不到，將跳過: {invalidMethodList}")
+                logging.warning(f"無效 method: {invalidMethodList}")
             targetMethodList = [m for m in methodsList if m in self.methodPoolDict]
 
         if not targetMethodList:
@@ -114,7 +114,7 @@ class PromptGenerator:
             print("錯誤: 沒有任何有效的 method，請檢查 prompt_config.yaml 的 selectedMethods 設定")
             return
 
-        maxSize = settingsDict.get('maxSize', len(targetMethodList))
+        maxSize = autoSettingsDict.get('maxSize', len(targetMethodList))
         if not isinstance(maxSize, int) or maxSize < 1:
             print(f"maxSize 值 '{maxSize}' 無效，將使用預設值 {len(targetMethodList)}")
             maxSize = len(targetMethodList)
@@ -137,29 +137,29 @@ class PromptGenerator:
                     self.addCombination(idList, textList)
 
     def generateManualMode(self):
-            manualKeyList = self.cfgDict.get('manualCombinations', [])
+            manualKeyList = self.config.get('manualCombinations', [])
             if not manualKeyList:
                 print("警告: manualCombinations 為空，沒有任何組合可以生成")
                 logging.warning("manualCombinations 為空")
                 return
             flatPoolDict = {}
 
-            for catStr, itemsDict in self.methodPoolDict.items():
+            for cat, itemsDict in self.methodPoolDict.items():
                 if not isinstance(itemsDict, dict):
                     continue
-                for k, textStr in itemsDict.items():
-                    kStr = str(k).zfill(2)
-                    fullIdStr = f"{catStr}{kStr}"
-                    flatPoolDict[fullIdStr] = {'promptID': fullIdStr, 'promptText': textStr.strip()}
+                for k, text in itemsDict.items():
+                    paddedKey = str(k).zfill(2)
+                    fullId = f"{cat}{paddedKey}"
+                    flatPoolDict[fullId] = {'promptID': fullId, 'promptText': text.strip()}
 
             for comboKeyList in manualKeyList:
                 idList, textList = [], []
-                for itemKeyStr in comboKeyList:
-                    if itemKeyStr in flatPoolDict:
-                        idList.append(flatPoolDict[itemKeyStr]['promptID'])
-                        textList.append(flatPoolDict[itemKeyStr]['promptText'])
+                for itemKey in comboKeyList:
+                    if itemKey in flatPoolDict:
+                        idList.append(flatPoolDict[itemKey]['promptID'])
+                        textList.append(flatPoolDict[itemKey]['promptText'])
                     else:
-                        print(f"警告: 找不到指定的 Prompt ID '{itemKeyStr}'，將跳過此項目。")
+                        print(f"警告: 找不到指定的 Prompt ID '{itemKey}'，將跳過此項目。")
 
                 if idList:
 
@@ -179,7 +179,7 @@ class PromptExporter:
         self.outputDirPath = Path(outputDirPath)
         self.fileName = fileName
 
-    def exportToCsv(self, generatedPromptList):
+    def saveToCsv(self, generatedPromptList):
         if not generatedPromptList:
             print("警告：目前沒有任何生成的 Prompt 可以匯出！")
             return None
@@ -206,49 +206,49 @@ class PromptExporter:
 # 指揮官 (Manager) - 整合以上模組
 # ==========================================
 class PromptManager:
-    def __init__(self, configDict):
-        self.cfgDict = configDict
+    def __init__(self, config):
+        self.config = config
         self._validateConfig()
 
         # 1. 處理設定與路徑
-        self.yamlPath = configDict.get("promptYamlPath", "configs/prompts.yaml")
-        rawOutputPath = Path(configDict.get('promptCmbOutputPath', 'prompt_output/generated_prompt_list.csv'))
+        self.yamlPath = config.get("promptYamlPath", "configs/prompts.yaml")
+        rawOutputPath = Path(config.get('promptCmbOutputPath', 'prompt_output/generated_prompt_list.csv'))
         self.outputDirPath = PromptConfig.ensureDirectories(rawOutputPath.parent)
         self.fileName = rawOutputPath.stem
 
         # 2. 讀取資料
-        self.methodPoolDict = PromptConfig.loadYaml(self.yamlPath)
+        self.methodPoolDict = PromptConfig.loadMethodPool(self.yamlPath)
         if not self.methodPoolDict:
             raise ValueError(f"'{self.yamlPath}' 中沒有任何有效的 method，請確認 YAML 格式")
 
         # 3. 初始化生成器
-        self.generatorObj = PromptGenerator(self.methodPoolDict, self.cfgDict)
+        self.generator = PromptGenerator(self.methodPoolDict, self.config)
         self.generatedPromptList = []
 
     def _validateConfig(self):
-        b_isExhaustiveCmb = self.cfgDict.get('b_isExhaustiveCmb', True)
+        b_isExhaustiveCmb = self.config.get('b_isExhaustiveCmb', True)
         if not isinstance(b_isExhaustiveCmb, bool):
             raise ValueError(f"b_isExhaustiveCmb 設定錯誤: '{b_isExhaustiveCmb}'，請填入 true 或 false")
 
-        if not b_isExhaustiveCmb and not self.cfgDict.get('manualCombinations'):
+        if not b_isExhaustiveCmb and not self.config.get('manualCombinations'):
             print("警告: b_isExhaustiveCmb 為 false (手動模式) 但未設定 manualCombinations")
             logging.warning("manual 模式但 manualCombinations 未設定")
 
         if b_isExhaustiveCmb:
-            maxSize = self.cfgDict.get('autoSettings', {}).get('maxSize')
+            maxSize = self.config.get('autoSettings', {}).get('maxSize')
             if maxSize is not None and (not isinstance(maxSize, int) or maxSize < 1):
                 raise ValueError(f"maxSize 設定錯誤: '{maxSize}'，請填入正整數")
 
     def generateCombinations(self):
         """呼叫生成器進行邏輯運算"""
-        self.generatedPromptList = self.generatorObj.generate()
+        self.generatedPromptList = self.generator.generate()
         return self.generatedPromptList
 
     def exportPromptFiles(self):
         """呼叫匯出器處理存檔"""
         print(f"\n正在準備輸出 Prompt 列表至目錄: {self.outputDirPath} ...")
-        exporterObj = PromptExporter(self.outputDirPath, self.fileName)
-        return exporterObj.exportToCsv(self.generatedPromptList)
+        exporter = PromptExporter(self.outputDirPath, self.fileName)
+        return exporter.saveToCsv(self.generatedPromptList)
 
 # ==========================================
 # 主程式進入點
@@ -257,10 +257,10 @@ if __name__ == "__main__":
     print("啟動階段一：生成與匯出 Prompt 組合")
 
     try:
-        cfgDict = PromptConfig.loadConfig()
-        pmObj = PromptManager(configDict=cfgDict)
-        pmObj.generateCombinations()
-        csvPath = pmObj.exportPromptFiles()
+        config = PromptConfig.loadYaml()
+        manager = PromptManager(config=config)
+        manager.generateCombinations()
+        csvPath = manager.exportPromptFiles()
 
         if csvPath:
             print("\n" + "="*50)

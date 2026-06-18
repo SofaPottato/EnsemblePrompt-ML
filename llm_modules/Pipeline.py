@@ -4,17 +4,17 @@ from dataclasses import dataclass
 from typing import List, Set, Dict, Any
 import pandas as pd
 
-from .OllamaEngine import LLMEngine, RAW_CSV_SCHEMA, TASK_RUN_ID_COLUMNS
+from .OllamaEngine import LLMEngine, RAW_CSV_COLS, TASK_RUN_ID_COLUMNS
 from .OutputParser import OutputParser
 from .LLMResultProcessor import LLMResultProcessor
 from .Evaluate import PromptCmbEval
 from .PromptFormatter import PromptFormatter
-from .utils import parsePairListField
+from .utils import parseJsonCell, CSV_ENCODING, CSV_WRITE_KWARGS
 from .schemas import (
     DataLoadError,
     TaskBuildError,
     InferenceError,
-    LLMAppConfig,
+    PipelineConfig,
     LLMTask,
     ModelName,
     PromptID,
@@ -54,7 +54,7 @@ class ExperimentPipeline:
     各階段失敗拋對應子類例外，由 Main_PromptCmb.py 統一捕捉。
     """
 
-    def __init__(self, config: LLMAppConfig):
+    def __init__(self, config: PipelineConfig):
         self.config = config
         self.pathConfig = config.paths
         self.promptFormatter = PromptFormatter(
@@ -68,13 +68,13 @@ class ExperimentPipeline:
     def run(self):
         """六階段：載入 → 建構任務 → 推論 → 解析 → 後處理 → 評估。"""
         logging.info("[Step 1/6] Loading Task CSV & Prompts")
-        taskDataDf = self.loadTaskData()
+        taskDf = self.loadTaskData()
         promptList = self.loadPrompts()
         completedTaskRunIDSet = self.loadCompletedTaskRunIDs()
 
         logging.info("[Step 2/6] Building LLM Tasks")
-        taskBatchList = self._buildTaskBatches(taskDataDf)
-        self._validateLabelAlignment(taskBatchList)
+        taskBatchList = self._buildTaskBatches(taskDf)
+        self._validateLabels(taskBatchList)
         self.savePromptPreview(taskBatchList, promptList)
         pendingTaskList = self.buildPendingTasks(taskBatchList, promptList, completedTaskRunIDSet)
 
@@ -135,20 +135,20 @@ class ExperimentPipeline:
         if not csvPath.exists():
             raise DataLoadError(f"找不到 Task CSV: {csvPath}")
 
-        taskDataDf = pd.read_csv(csvPath, encoding='utf-8-sig')
-        # taskType 已由 LLMAppConfig.validateTaskMode 限定為 PPI / BC5CDR，之後有新資料集再擴充對應的必要欄位組合。
+        taskDf = pd.read_csv(csvPath, encoding=CSV_ENCODING)
+        # taskType 已由 PipelineConfig.validateTaskMode 限定為 PPI / BC5CDR，之後有新資料集再擴充對應的必要欄位組合。
         if self.config.taskType == "PPI":
             requiredColSet = {'taskID', self.config.labelColumn} | set(self.config.contextColumns)
         else:
             requiredColSet = {'taskID', 'pairs'} | set(self.config.contextColumns)
 
         # 用 set 差集找缺漏欄，錯誤訊息直接列出缺哪些，方便對照前處理輸出。
-        missingColSet = requiredColSet - set(taskDataDf.columns)
+        missingColSet = requiredColSet - set(taskDf.columns)
         if missingColSet:
             raise DataLoadError(f"Task CSV 缺少必要欄位: {missingColSet}")
 
-        logging.info(f"[Loader] Task CSV 載入完成: {len(taskDataDf)} 筆 from {csvPath}")
-        return taskDataDf
+        logging.info(f"[Loader] Task CSV 載入完成: {len(taskDf)} 筆 from {csvPath}")
+        return taskDf
 
     def loadPrompts(self) -> List[Prompt]:
         """載入 Prompt 組合 CSV（必要欄位：promptID, promptText），回傳 Prompt list。"""
@@ -156,11 +156,11 @@ class ExperimentPipeline:
         if not csvPath.exists():
             raise DataLoadError(f"找不到 Prompt 組合檔案: {csvPath}")
 
-        promptDataDf = pd.read_csv(csvPath, encoding='utf-8-sig')
-        if 'promptID' not in promptDataDf.columns or 'promptText' not in promptDataDf.columns:
+        promptDf = pd.read_csv(csvPath, encoding=CSV_ENCODING)
+        if 'promptID' not in promptDf.columns or 'promptText' not in promptDf.columns:
             raise DataLoadError("Prompt CSV 缺少 'promptID' 或 'promptText' 欄位。")
 
-        promptList = [Prompt(**row) for row in promptDataDf[['promptID', 'promptText']].to_dict('records')]
+        promptList = [Prompt(**row) for row in promptDf[['promptID', 'promptText']].to_dict('records')]
         logging.info(f"[Loader] Prompt CSV 載入完成: {len(promptList)} 筆 from {csvPath}")
         return promptList
 
@@ -176,7 +176,7 @@ class ExperimentPipeline:
             return completedTaskRunIDSet
 
         try:
-            rawOutputDataDf = pd.read_csv(csvPath, encoding='utf-8-sig')
+            rawDf = pd.read_csv(csvPath, encoding=CSV_ENCODING)
         except (pd.errors.ParserError, pd.errors.EmptyDataError, OSError, UnicodeDecodeError) as e:
             raise DataLoadError(
                 f"raw.csv 讀取失敗（壞檔或編碼問題）: {e}。"
@@ -184,7 +184,7 @@ class ExperimentPipeline:
             ) from e
 
         # schema 不符則 raise，欄位對不上代表 raw.csv 格式錯誤
-        missingColSet = set(RAW_CSV_SCHEMA) - set(rawOutputDataDf.columns)
+        missingColSet = set(RAW_CSV_COLS) - set(rawDf.columns)
         if missingColSet:
             raise DataLoadError(
                 f"raw.csv schema 不符，缺欄位: {sorted(missingColSet)}。"
@@ -192,7 +192,7 @@ class ExperimentPipeline:
             )
 
         # 只取三個 key 欄、dropna 後組成 set；strip 對齊寫入端的格式，避免空白造成比對失準。
-        taskRunIDDf = rawOutputDataDf[list(TASK_RUN_ID_COLUMNS)].dropna()
+        taskRunIDDf = rawDf[list(TASK_RUN_ID_COLUMNS)].dropna()
         completedTaskRunIDSet.update(
             TaskRunID(str(r.model).strip(), str(r.promptID).strip(), str(r.taskID).strip())
             for r in taskRunIDDf.itertuples(index=False)
@@ -219,7 +219,7 @@ class ExperimentPipeline:
                 })
 
         csvPath = self.pathConfig.promptPreviewPath
-        pd.DataFrame(previewRecordList).to_csv(str(csvPath), index=False, encoding='utf-8-sig')
+        pd.DataFrame(previewRecordList).to_csv(str(csvPath), **CSV_WRITE_KWARGS)
         logging.info(f"[Loader] Prompt preview 已寫入: {len(previewRecordList)} 筆 → {csvPath}")
 
     def buildPendingTasks(self,
@@ -264,7 +264,7 @@ class ExperimentPipeline:
         logging.info(f"[Builder] 待執行任務: {len(pendingTaskList)} 筆")
         return pendingTaskList
 
-    def _validateLabelAlignment(self, taskBatchList: List[TaskBatch]) -> None:
+    def _validateLabels(self, taskBatchList: List[TaskBatch]) -> None:
         """
         在攤平後的 pairList 上做一次性對齊檢查，PPI / BC5CDR 共用同一條路徑。
         任何 pair 缺 'label' 欄、或 'label' 對不到 labelSet.classes 即 fail-fast，
@@ -301,7 +301,7 @@ class ExperimentPipeline:
                 f"{samplePreview}。請檢查前處理輸出或 config 的 labelSet 是否一致（比對為去空白、大小寫不敏感）。"
             )
 
-    def _buildTaskBatches(self, taskDataDf: pd.DataFrame) -> List[TaskBatch]:
+    def _buildTaskBatches(self, taskDf: pd.DataFrame) -> List[TaskBatch]:
         """
         將 Task CSV 每列預處理成 TaskBatch（parse JSON、依 maxPairsPerBatch 切片、format userPrompt）。
         """
@@ -310,10 +310,9 @@ class ExperimentPipeline:
         labelColumn = self.config.labelColumn
         taskBatchList: List[TaskBatch] = []
 
-        for _, row in taskDataDf.iterrows():
+        for _, row in taskDf.iterrows():
             baseTaskID = str(row['taskID'])
             taskContextDict: Dict[str, Any] = {col: row[col] for col in self.config.contextColumns}
-
             # 兩種模式攤平成「同一種 pairList 結構」，後續切片/渲染就能共用同一條路徑：
             #  - PPI：把單一 labelColumn 包成單元素 list（型別與 multi 一致）。
             #  - BC5CDR：解析 pairs JSON 欄成 list。
@@ -321,23 +320,19 @@ class ExperimentPipeline:
             if taskType == "PPI":
                 allLabelPairList: List[Dict[str, Any]] = [{'label': row[labelColumn]}]
             else:
-                allLabelPairList = parsePairListField(row['pairs'], 'pairs', baseTaskID)
+                allLabelPairList = parseJsonCell(row['pairs'], 'pairs', baseTaskID)
             # 之後如果要新增資料集格式可以在這裡，但一定要有taskID與contextcolumn
-
             # 依 maxPairsPerBatch 切片，每片產生一個 TaskBatch；PPI 因 maxPairsPerBatch=1 永遠只切出 1 片。
             for offset in range(0, len(allLabelPairList), maxPairsPerBatch):
                 batchLabelPairList = allLabelPairList[offset:offset + maxPairsPerBatch]
-
                 # 有切片（pair 數 > 一批容量）才在 taskID 加 _offset 區分；否則沿用原 taskID。
                 batchTaskID = (
                     f"{baseTaskID}_{offset}"
                     if len(allLabelPairList) > maxPairsPerBatch
                     else baseTaskID
                 )
-
                 # 在建構期把字串渲染做完，inference 階段只負責拿渲染好的 prompt 丟給 LLM。
                 userPrompt = self.promptFormatter.format(taskContextDict, batchLabelPairList)
-
                 taskBatchList.append(
                     TaskBatch(batchTaskID, batchLabelPairList, userPrompt, taskContextDict)
                 )

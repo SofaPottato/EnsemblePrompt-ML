@@ -2,7 +2,8 @@ import pandas as pd
 import logging
 from pathlib import Path
 from typing import List, Dict
-from .schemas import PipelineError, Classification
+from .schemas import PipelineError, LabelSet
+from .utils import CSV_ENCODING, CSV_WRITE_KWARGS
 
 
 class LLMResultProcessor:
@@ -10,23 +11,22 @@ class LLMResultProcessor:
     將 OutputParser 的長表格清理後，由長表 pivot 成寬表，供下游 Evaluate 與人工檢視使用。
     result.csv (long) → partialInfo.csv (wide) + fullInfo.csv（含 rawOutput / sysPrompt）。
     """
-
+    #後綴命名規則：所有衍生 runKey 欄位都帶後綴，方便後續過濾。
     _PRED_SUFFIX = '__pred'
     _RAW_SUFFIX = '__raw'
     _SYS_PROMPT_SUFFIX = '__sysPrompt'
-    _RUN_KEY_SEPARATOR = '|'   # model 與 promptID 之間的分隔字元；'_' 會與模型名沖突，使用'|'分隔 
-    _CSV_KWARGS = {'index': False, 'encoding': 'utf-8-sig'}
+    _RUN_KEY_SEPARATOR = '|'   # model 與 promptID 之間的分隔字元；'_' 會與模型名沖突，使用'|'分隔
     _REQUIRED_COLS = ('sentID', 'model', 'promptID', 'predLabel', 'trueLabel')
     # pivot 時「不能」當 index 的欄：model/promptID/runKey 是 column 維度，predLabel/rawOutput 是 value。
     _NON_INDEX_COLS = {'model', 'promptID', 'runKey', 'predLabel', 'rawOutput'}
 
     def __init__(self, parsedOutputCsvPath: Path, partialInfoCsvPath: Path, fullInfoCsvPath: Path,
-                 promptList: List[Dict] = None, labelSet: Classification = None):
-        self.parsedOutputCsvPath = Path(parsedOutputCsvPath)
+                 promptList: List[Dict] = None, labelSet: LabelSet = None):
+        self.parsedOutputCsvPath = Path(parsedOutputCsvPath) 
         self.partialInfoCsvPath = Path(partialInfoCsvPath)
         self.fullInfoCsvPath = Path(fullInfoCsvPath)
         self.promptList = promptList or []
-        self.labelSet = labelSet or Classification()
+        self.labelSet = labelSet or LabelSet()
 
         self.inputDf = None
         self.partialDf = None
@@ -47,7 +47,7 @@ class LLMResultProcessor:
         if not self.parsedOutputCsvPath.exists():
             raise PipelineError(f"File not found: {self.parsedOutputCsvPath}")
         try:
-            self.inputDf = pd.read_csv(self.parsedOutputCsvPath, encoding='utf-8-sig')
+            self.inputDf = pd.read_csv(self.parsedOutputCsvPath, encoding=CSV_ENCODING)
         except Exception as e:
             raise PipelineError(f"Failed to read CSV: {e}") from e
 
@@ -103,8 +103,8 @@ class LLMResultProcessor:
     def _saveData(self) -> Path:
         """寫精簡版與完整版，記錄統計後回傳精簡版路徑。"""
         try:
-            self._writePartialInfoCsv()
-            self._writeFullInfoCsv()
+            self._savePartialInfoCsv()
+            self._saveFullInfoCsv()
             self._logSummary()
             return self.partialInfoCsvPath
         except PipelineError:
@@ -112,14 +112,14 @@ class LLMResultProcessor:
         except Exception as e:
             raise PipelineError(f"Failed to save results: {e}") from e
 
-    def _writePartialInfoCsv(self) -> None:
+    def _savePartialInfoCsv(self) -> None:
         """精簡版：sentID + trueLabel + 各 runKey 的 __pred 欄。"""
         # partialInfo.csv 只保留 sentID、trueLabel、以及預測欄（即 runKey + __pred 後綴）。 
         predCols = [c for c in self.partialDf.columns if c.endswith(self._PRED_SUFFIX)]
         leanCols = [c for c in ('sentID', 'trueLabel') if c in self.partialDf.columns] + predCols
-        self.partialDf[leanCols].to_csv(self.partialInfoCsvPath, **self._CSV_KWARGS)
+        self.partialDf[leanCols].to_csv(self.partialInfoCsvPath, **CSV_WRITE_KWARGS)
 
-    def _writeFullInfoCsv(self) -> None:
+    def _saveFullInfoCsv(self) -> None:
         """完整版：補 {runKey}__sysPrompt 欄 → 欄位重排 → 寫檔。"""
         # 補 {runKey}__sysPrompt 欄（promptList 為空則跳過）。
         # 把每個 runKey 當次用的 system prompt 補進去，方便事後追溯。
@@ -147,7 +147,7 @@ class LLMResultProcessor:
         idCols = [c for c in ('sentID',) if c in indexCols]
         otherIndexCols = [c for c in indexCols if c not in labelCols and c not in idCols]
         orderedCols = idCols + labelCols + rawCols + predCols + sysPromptCols + otherIndexCols
-        self.fullDf[orderedCols].to_csv(self.fullInfoCsvPath, **self._CSV_KWARGS)
+        self.fullDf[orderedCols].to_csv(self.fullInfoCsvPath, **CSV_WRITE_KWARGS)
 
     def _logSummary(self) -> None:
         """輸出 parse rate 與 partial / full 兩張寬表的 shape 資訊。"""

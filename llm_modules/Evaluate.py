@@ -6,8 +6,8 @@ from matplotlib.colors import ListedColormap
 import logging
 from pathlib import Path
 from sklearn.metrics import confusion_matrix, accuracy_score, precision_score, recall_score, f1_score, matthews_corrcoef
-from .utils import sanitizeFilename
-from .schemas import Classification
+from .utils import sanitizeFilename, CSV_ENCODING, CSV_WRITE_KWARGS
+from .schemas import LabelSet
 
 
 class PromptCmbEval:
@@ -17,24 +17,23 @@ class PromptCmbEval:
     有效標籤為 classes 索引 0..N-1，-1（無法解析）一律排除於指標、計為答錯於難題分析。
     """
 
-    _CSV_KWARGS = {'index': False, 'encoding': 'utf-8-sig'}
-    _PRED_SUFFIX = '__pred'   
+    _PRED_SUFFIX = '__pred'
 
     def __init__(self, partialInfoCsvPath: Path, outputDirPath: Path = Path("./output"),
-                 labelSet: Classification = None):
+                 labelSet: LabelSet = None):
 
         self.partialInfoCsvPath = Path(partialInfoCsvPath)
         self.outputDirPath = Path(outputDirPath)
         self.plotsDirPath = self.outputDirPath / "plots"
 
         # _validLabels = [0..N-1]，即「有效預測」的值域；用來把 -1（無法解析）從指標中濾掉。
-        cfg = labelSet or Classification()
+        cfg = labelSet or LabelSet()
         self.classes = cfg.classes
         self._validLabels = list(range(len(self.classes)))
 
         self.inputDf = None
-        self.predColNamesList = []
-        self.idColNamesList = []
+        self.predCols = []
+        self.idCols = []
         self.yTrueLabelSeries = None
 
         self.metricsResultsList = []
@@ -59,10 +58,10 @@ class PromptCmbEval:
         if not self.partialInfoCsvPath.exists():
             raise FileNotFoundError(f"Eval input CSV not found: {self.partialInfoCsvPath}")
 
-        self.inputDf = pd.read_csv(str(self.partialInfoCsvPath))
+        self.inputDf = pd.read_csv(str(self.partialInfoCsvPath), encoding=CSV_ENCODING)
 
-        self.idColNamesList = ['sentID']
-        self.predColNamesList = [col for col in self.inputDf.columns if col not in ('trueLabel', 'sentID')]
+        self.idCols = ['sentID']
+        self.predCols = [col for col in self.inputDf.columns if col not in ('trueLabel', 'sentID')]
 
         self.yTrueLabelSeries = self.inputDf['trueLabel']
         self.correctnessMatrixDf = pd.DataFrame(index=self.inputDf.index)
@@ -71,7 +70,7 @@ class PromptCmbEval:
 
         logging.info(
             f"[Eval] 載入完成: shape={self.inputDf.shape}, "
-            f"預測欄={len(self.predColNamesList)}, index欄={self.idColNamesList} → {self.outputDirPath}"
+            f"預測欄={len(self.predCols)}, index欄={self.idCols} → {self.outputDirPath}"
         )
 
     def _evalAllPredCols(self):
@@ -84,48 +83,48 @@ class PromptCmbEval:
         if len(self.classes) == 2:
             logging.info(f"[Eval] 正類 = '{self.classes[1]}'；負類 = '{self.classes[0]}' ")
 
-        correctnessCols = {}
-        for predColName in self.predColNamesList:
+        correctnessByCol = {}
+        for predColName in self.predCols:
             # 指標只用有效預測：整欄都 -1（該 runKey 全解析失敗）→ getValidPair 回 None，跳過指標。
             validLabelsTuple = self._getValidPair(predColName)
             if validLabelsTuple is None:
                 logging.warning(f"[Eval] 跳過 {predColName}: 無有效預測 (predLabel ∉ classes 索引 0..N-1)")
                 continue
-            trueValidSeries, predValidSeries = validLabelsTuple
+            yTrueValidSeries, yPredValidSeries = validLabelsTuple
 
-            evalMetricsDict = self._calcMetrics(trueValidSeries, predValidSeries)
+            evalMetricsDict = self._calcMetrics(yTrueValidSeries, yPredValidSeries)
             if evalMetricsDict:
                 resultRowDict = {"modelPromptID": predColName.removesuffix(self._PRED_SUFFIX)}
                 resultRowDict.update(evalMetricsDict)
-                resultRowDict["validCount"] = len(trueValidSeries)
+                resultRowDict["validCount"] = len(yTrueValidSeries)
                 self.metricsResultsList.append(resultRowDict)
 
-            correctnessCols[predColName] = (self.inputDf[predColName] == self.yTrueLabelSeries).astype(int)
+            correctnessByCol[predColName] = (self.inputDf[predColName] == self.yTrueLabelSeries).astype(int)
 
-        if correctnessCols:
-            self.correctnessMatrixDf = pd.DataFrame(correctnessCols, index=self.inputDf.index)
+        if correctnessByCol:
+            self.correctnessMatrixDf = pd.DataFrame(correctnessByCol, index=self.inputDf.index)
 
         if self.metricsResultsList:
             self.metricsSummaryDf = pd.DataFrame(self.metricsResultsList).sort_values('f1Score', ascending=False)
         else:
             logging.warning("[Eval] 無有效結果，未產生 eval_summary.csv")
 
-    def _calcMetrics(self, trueLabelSeries, predLabelSeries) -> dict:
+    def _calcMetrics(self, yTrueSeries, yPredSeries) -> dict:
         """
         計算單一 runKey 的分類指標（Accuracy / Precision / Recall / F1 / MCC）。
         二元 → 正類為 classes 索引 1；多分類 → macro 平均（各類別等權）。
         MCC 原生支援多分類；zero_division=0 讓無正類預測時回傳 0 而非報錯。
         yTrue 為空時回傳 None。
         """
-        if len(trueLabelSeries) == 0:
+        if len(yTrueSeries) == 0:
             return None
         avg = 'binary' if len(self.classes) == 2 else 'macro'
         metricsDict = {
-            "accuracy":  accuracy_score(trueLabelSeries, predLabelSeries),
-            "precision": precision_score(trueLabelSeries, predLabelSeries, average=avg, zero_division=0),
-            "recall":    recall_score(trueLabelSeries, predLabelSeries, average=avg, zero_division=0),
-            "f1Score":   f1_score(trueLabelSeries, predLabelSeries, average=avg, zero_division=0),
-            "mcc":       matthews_corrcoef(trueLabelSeries, predLabelSeries)
+            "accuracy":  accuracy_score(yTrueSeries, yPredSeries),
+            "precision": precision_score(yTrueSeries, yPredSeries, average=avg, zero_division=0),
+            "recall":    recall_score(yTrueSeries, yPredSeries, average=avg, zero_division=0),
+            "f1Score":   f1_score(yTrueSeries, yPredSeries, average=avg, zero_division=0),
+            "mcc":       matthews_corrcoef(yTrueSeries, yPredSeries)
         }
         return {k: round(v, 2) for k, v in metricsDict.items()}
 
@@ -144,9 +143,9 @@ class PromptCmbEval:
         hardSampleIndexList = correctCountsSeries[correctCountsSeries == 0].index
 
         # 難題清單只留 sentID + trueLabel，給人工覆檢用（available 過濾避免欄位不存在時 KeyError）。
-        reviewColNamesList = self.idColNamesList + ['trueLabel']
-        availableReviewColNamesList = [c for c in reviewColNamesList if c in self.inputDf.columns]
-        self.hardSamplesDf = self.inputDf.loc[hardSampleIndexList, availableReviewColNamesList]
+        reviewCols = self.idCols + ['trueLabel']
+        availableReviewCols = [c for c in reviewCols if c in self.inputDf.columns]
+        self.hardSamplesDf = self.inputDf.loc[hardSampleIndexList, availableReviewCols]
 
         # Upper Bound = 非難題比例：代表準確率天花板。
         totalSampleCount = len(self.inputDf)
@@ -159,7 +158,7 @@ class PromptCmbEval:
         """為每個 runKey 繪製混淆矩陣 PNG（排除 -1），存至 plots/ 目錄。"""
         logging.info("[Eval] 繪製混淆矩陣中")
 
-        for predColName in self.predColNamesList:
+        for predColName in self.predCols:
             validLabelsTuple = self._getValidPair(predColName)
             if validLabelsTuple is None:
                 continue
@@ -211,10 +210,10 @@ class PromptCmbEval:
             upperBoundRow = {col: "" for col in summaryDf.columns}
             upperBoundRow["modelPromptID"] = f"upperBound: {self.upperBound:.2%}"
             summaryDf = pd.concat([summaryDf, pd.DataFrame([upperBoundRow])], ignore_index=True)
-            summaryDf.to_csv(str(self.outputDirPath / "evalSummary.csv"), **self._CSV_KWARGS)
+            summaryDf.to_csv(str(self.outputDirPath / "evalSummary.csv"), **CSV_WRITE_KWARGS)
 
         if self.hardSamplesDf is not None:
-            self.hardSamplesDf.to_csv(str(self.outputDirPath / "samplesToReview.csv"), **self._CSV_KWARGS)
+            self.hardSamplesDf.to_csv(str(self.outputDirPath / "samplesToReview.csv"), **CSV_WRITE_KWARGS)
 
         logging.info(f"[Eval] 所有結果已儲存 → {self.outputDirPath}")
 

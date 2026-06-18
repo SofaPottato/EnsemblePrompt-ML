@@ -3,8 +3,8 @@ import json
 import logging
 from pathlib import Path
 from typing import List, Optional
-from .schemas import ParsingError, Classification, RESERVED_PAIR_FIELDS
-from .utils import sanitizeFilename
+from .schemas import ParsingError, LabelSet, RESERVED_PAIR_FIELDS
+from .utils import sanitizeFilename, CSV_ENCODING, CSV_WRITE_KWARGS
 # 將所有輸出拆解後的命名改為SentID（sentenceID）
 
 class OutputParser:
@@ -14,9 +14,7 @@ class OutputParser:
     JSON 解析失敗或 label 不在 classes 中一律標 -1，由下游評估排除。
     """
 
-    _CSV_KWARGS = {'index': False, 'encoding': 'utf-8-sig'}
-
-    def __init__(self, rawOutputCsvPath: Path, parsedOutputCsvPath: Path, singlePromptCmbOutputDir: Path, labelSet: Classification):
+    def __init__(self, rawOutputCsvPath: Path, parsedOutputCsvPath: Path, singlePromptCmbOutputDir: Path, labelSet: LabelSet):
         self.rawOutputCsvPath = Path(rawOutputCsvPath)
         self.parsedOutputCsvPath = Path(parsedOutputCsvPath)
         self.singlePromptCmbOutputDir = Path(singlePromptCmbOutputDir)
@@ -26,10 +24,10 @@ class OutputParser:
         """主流程：讀 raw.csv → 逐 task 解析 → pair 展開（long format）→ 排序 → 存檔。"""
         # 整段包 try：本層自己拋的 ParsingError 原樣往上拋（保留具體訊息)
         try:
-            rawDf = self._loadRawCsv()
-            sentRowsList = self._parseTasksToRows(rawDf)
-            resultDf = self._buildResultDf(sentRowsList)
-            self._writeResultCsvs(resultDf)
+            rawDf = self._loadData()
+            sentRowList = self._parseTaskToRow(rawDf)
+            resultDf = self._buildResultDf(sentRowList)
+            self._saveResultCsvs(resultDf)
             logging.info(f"[Parser] 解析完成: {len(rawDf)} tasks → {len(resultDf)} samples → {self.parsedOutputCsvPath}")
             return self.parsedOutputCsvPath
         except ParsingError:
@@ -39,21 +37,21 @@ class OutputParser:
 
     # ── 私有流程方法 ─────────────────────────────────────────────────────────
 
-    def _loadRawCsv(self) -> pd.DataFrame:
+    def _loadData(self) -> pd.DataFrame:
         if not self.rawOutputCsvPath.exists():
             raise ParsingError(f"找不到暫存結果檔案: {self.rawOutputCsvPath}")
-        return pd.read_csv(str(self.rawOutputCsvPath), encoding='utf-8-sig')
+        return pd.read_csv(str(self.rawOutputCsvPath), encoding=CSV_ENCODING)
 
-    def _parseTasksToRows(self, rawDf: pd.DataFrame) -> List[dict]:
+    def _parseTaskToRow(self, rawDf: pd.DataFrame) -> List[dict]:
         """整體任務解析流程：每列 task row → 多列 sentRow（每 pair 一列）。"""
         # raw.csv 一列是「一次推論（一個 batch）」，可能含多個 pair
         # 這裡把它攤平成「一個 pair 一列」的 long format，後續才好 pivot 與評估。
-        sentRowsList = []
+        sentRowList = []
         for _, taskRow in rawDf.iterrows():
-            sentRowsList.extend(self._parseTaskRow(taskRow))
-        return sentRowsList
+            sentRowList.extend(self._expandTaskRow(taskRow))
+        return sentRowList
 
-    def _parseTaskRow(self, taskRow: pd.Series) -> List[dict]:
+    def _expandTaskRow(self, taskRow: pd.Series) -> List[dict]:
         """一列 task row → 展開成多列 sentRow（每個 pair 一列）。"""
         model    = taskRow.get('model')
         promptID = taskRow.get('promptID')
@@ -61,14 +59,14 @@ class OutputParser:
 
         # pairs 是寫檔時序列化的 JSON；解析回 list。空 list→ 跳過此 task 並 warning，
         # 而非 raise，避免單列異常打斷整批解析。
-        pairsList = self._parseJsonCell(taskRow.get('pairs'), default=[])
+        pairsList = self._parseJsonCellOrDefault(taskRow.get('pairs'), default=[])
         if not pairsList:
             logging.warning(f"[Parser] 跳過任務: pairs 為空 (model={model}, promptID={promptID})")
             return []
 
         rawOutput     = str(taskRow.get('rawOutput', ''))
         predLabels    = self._extractPredLabels(rawOutput, len(pairsList))
-        contextDict   = self._parseJsonCell(taskRow.get('context'), default={})
+        contextDict   = self._parseJsonCellOrDefault(taskRow.get('context'), default={})
 
         return [
             self._buildSentRow(model, promptID, taskID, rawOutput,
@@ -101,27 +99,27 @@ class OutputParser:
                 sentRow[otherColName] = otherColVal
         return sentRow
 
-    def _buildResultDf(self, sentRowsList: list) -> pd.DataFrame:
+    def _buildResultDf(self, sentRowList: list) -> pd.DataFrame:
         # 全部 task 的 pairs 都空（整批被跳過）→ 沒東西可評估，raise錯誤
-        if not sentRowsList:
+        if not sentRowList:
             raise ParsingError("解析後沒有產生任何有效資料。")
-        resultDf = pd.DataFrame(sentRowsList)
+        resultDf = pd.DataFrame(sentRowList)
         # 依 (model, promptID, sentID) 排序：讓同一組合的資料連續，方便下游 groupby/pivot，也方便人工對照。
         return resultDf.sort_values(['model', 'promptID', 'sentID'])
 
-    def _writeResultCsvs(self, resultDf: pd.DataFrame) -> None:
+    def _saveResultCsvs(self, resultDf: pd.DataFrame) -> None:
         """輸出合併版 result.csv，同時按 promptID 分檔。"""
         # 兩種輸出：合併版給下游 LLMResultProcessor 一次處理；
         # 按 promptID分檔版給人快速檢視單一 prompt 的表現。sanitizeFilename 處理 promptID 當檔名的跨平台安全。
-        resultDf.to_csv(str(self.parsedOutputCsvPath), **self._CSV_KWARGS)
+        resultDf.to_csv(str(self.parsedOutputCsvPath), **CSV_WRITE_KWARGS)
         for promptID, groupDf in resultDf.groupby('promptID'):
             singleCsvPath = self.singlePromptCmbOutputDir / f"{sanitizeFilename(promptID)}_result.csv"
-            groupDf.to_csv(singleCsvPath, **self._CSV_KWARGS)
+            groupDf.to_csv(singleCsvPath, **CSV_WRITE_KWARGS)
 
     # ── 解析工具方法 ──────────────────────────────────────────────────────────
 
     @staticmethod
-    def _parseJsonCell(rawValue, default):
+    def _parseJsonCellOrDefault(rawValue, default):
         """
         寬鬆解析 raw.csv 的 JSON 欄位（pairs / context）。
         NaN/None/非法型別 → default；字串 → json.loads（失敗記 warning 後 → default）。
@@ -170,7 +168,7 @@ class OutputParser:
                 if not isinstance(ans, dict):
                     continue
                 # id 優先（1-based 編號，能對抗亂序）、出現順序後備；都超界回 None 直接丟棄。
-                idx = self._resolveAnswerIndex(ans.get("id"), answerOrderIdx, batchSize)
+                idx = self._resolveAnswerID(ans.get("id"), answerOrderIdx, batchSize)
                 if idx is None:
                     continue
                 if idx in seenIdxSet:
@@ -193,7 +191,7 @@ class OutputParser:
             return None
 
     @staticmethod
-    def _resolveAnswerIndex(idValue, answerOrderIdx: int, batchSize: int) -> Optional[int]:
+    def _resolveAnswerID(idValue, answerOrderIdx: int, batchSize: int) -> Optional[int]:
         """id 為合法 1-based 編號 → id-1；否則退回出現順序 answerOrderIdx；皆超出範圍回 None。"""
         # id 優先：LLM 亂序回答（先 id=3 再 id=1）時，靠 id 才能正確配對 pair。
         try:

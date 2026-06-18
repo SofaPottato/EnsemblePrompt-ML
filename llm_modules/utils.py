@@ -8,7 +8,14 @@ import pandas as pd
 import sys
 from pathlib import Path
 from typing import Dict, List, Any
-from .schemas import LLMAppConfig, TaskBuildError
+from .schemas import PipelineConfig, TaskBuildError
+
+
+# 全專案統一的 CSV 編碼：utf-8-sig 帶 BOM，讓 Excel 開啟時正確辨識 UTF-8，中文不亂碼。
+# 讀寫兩端都引用同一常數，避免某處漏帶 sig 造成編碼不一致。
+CSV_ENCODING = 'utf-8-sig'
+# 寫出 CSV 的共用參數：不輸出 pandas 預設 index、統一編碼。所有 to_csv 都用 **CSV_WRITE_KWARGS。
+CSV_WRITE_KWARGS = {'index': False, 'encoding': CSV_ENCODING}
 
 
 def sanitizeFilename(name: Any) -> str:
@@ -24,7 +31,7 @@ def sanitizeFilename(name: Any) -> str:
             .replace("|", "_"))
 
 
-def parsePairListField(value: Any, fieldName: str, taskID: str) -> Any:
+def parseJsonCell(value: Any, fieldName: str, taskID: str) -> Any:
     """
     解析 Task CSV 的 JSON 欄位字串。
     None / NaN → raise TaskBuildError；其他非字串 → 原樣回傳；字串 → json.loads（失敗往上拋）。
@@ -39,13 +46,13 @@ def parsePairListField(value: Any, fieldName: str, taskID: str) -> Any:
     # 已是 list/dict（程式式呼叫、非從 CSV 讀）→ 原樣回傳，不重複解析。
     return value
 
-class ReadLLMConfig:
-    """讀取 YAML 設定檔並透過 Pydantic (LLMAppConfig) 驗證。"""
+class ConfigLoader:
+    """載入 YAML 設定檔並透過 Pydantic (PipelineConfig) 驗證。"""
     def __init__(self, configPath: str):
         # 載入後立刻丟進 Pydantic：所有相容性檢查（taskType、labelSet…）都在 model 建構時觸發，
         # 因此 config 一旦建成，下游就能信任它的合法性，不必再各自驗。
         rawYamlDict = self.loadYaml(configPath)
-        self.config: LLMAppConfig = LLMAppConfig(**rawYamlDict)
+        self.config: PipelineConfig = PipelineConfig(**rawYamlDict)
 
     def loadYaml(self, path: str) -> Dict[str, Any]:
         """以 UTF-8 載入 YAML 並回傳 dict。"""
@@ -59,7 +66,7 @@ def initializeGlobalLogger(logDir: str = "./logs", logName: str = "experiment.lo
     httpx logger 拉到 WARNING，避免推論時被連線層 INFO 訊息淹沒。
     """
     os.makedirs(logDir, exist_ok=True)
-    logPathStr = os.path.join(logDir, logName)
+    logPath = os.path.join(logDir, logName)
 
     # force=True：洗掉任何既有 handler，確保重複呼叫（如測試）或第三方套件先動過 logging 時，
     # 設定仍以這裡為準。同時掛檔案 + stdout 兩個 handler，讓 log 既留存又即時可見。
@@ -69,17 +76,15 @@ def initializeGlobalLogger(logDir: str = "./logs", logName: str = "experiment.lo
         datefmt="%Y-%m-%d %H:%M:%S",  
         force=True,
         handlers=[
-            logging.FileHandler(logPathStr, encoding='utf-8'),
+            logging.FileHandler(logPath, encoding='utf-8'),
             logging.StreamHandler(sys.stdout)
         ]
     )
-    # 推論階段 httpx 每個請求都會吐 INFO，量大到會淹沒我們自己的進度訊息，故單獨壓到 WARNING。
     logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.info(f"[Logger] 初始化完成 → {logPathStr}")
+    logging.info(f"[Logger] 初始化完成 → {logPath}")
 
 def setupSeed(seed: int = 42) -> None:
-    """固定 Python random / NumPy / PYTHONHASHSEED，確保實驗可重現。Ollama 端隨機性由 temperature=0 控制。"""
-    # 三個來源都要固定才算真正可重現：random（純 Python）、np.random（取樣/打散）、 PYTHONHASHSEED（影響 set/dict 的迭代順序，間接影響任務派送順序）。
+    """固定 Python random / NumPy / PYTHONHASHSEED，確保實驗可重現。"""
     random.seed(seed)
     np.random.seed(seed)
     os.environ['PYTHONHASHSEED'] = str(seed)

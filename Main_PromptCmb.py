@@ -4,17 +4,17 @@ import logging
 import sys
 import os
 from pathlib import Path
-from llm_modules.utils import ReadLLMConfig, initializeGlobalLogger, setupSeed
+from llm_modules.utils import ConfigLoader, initializeGlobalLogger, setupSeed
 from llm_modules.Pipeline import ExperimentPipeline
 
 _ROOT = Path(__file__).parent
 os.chdir(_ROOT)
 def startLLMPipeline() -> int:
     """初始化 logger/seed、建立 Pipeline 並執行。回傳 0 成功，1 失敗。"""
-    parserObj = argparse.ArgumentParser(description="LLM Inference Runner")
-    parserObj.add_argument('--config', type=str, default=str(_ROOT / 'configs' / 'PPI_config.yaml'),
+    parser = argparse.ArgumentParser(description="LLM Inference Runner")
+    parser.add_argument('--config', type=str, default=str(_ROOT / 'configs' / 'PPI_config.yaml'),
                            help='Path to YAML config file (e.g. configs/PPI_config.yaml)')
-    argsObj = parserObj.parse_args()
+    args = parser.parse_args()
     initializeGlobalLogger(logDir=str(_ROOT / 'logs'), logName="llmLog.log")
     setupSeed(42)
 
@@ -23,9 +23,9 @@ def startLLMPipeline() -> int:
     logging.info("========================================")
 
     try:
-        configManagerObj = ReadLLMConfig(argsObj.config)
-        pipelineObj = ExperimentPipeline(configManagerObj.config)
-        pipelineObj.run()
+        configManager = ConfigLoader(args.config)
+        pipeline = ExperimentPipeline(configManager.config)
+        pipeline.run()
         return 0
     except Exception as e:
         logging.critical(f"發生未預期的錯誤: {e}", exc_info=True)

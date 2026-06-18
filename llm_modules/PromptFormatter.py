@@ -46,7 +46,7 @@ class PromptFormatter:
         return _safeFormat(self.taskTemplate, {**contextDict, 'pairs': pairsText})
 
     def _formatSingle(self, contextDict: Dict, pairs: List[Dict]) -> str:
-        """單筆模式：context 與 pairs[0] 合併後直接填入 taskTemplate。pair 欄優先，同名時覆蓋 context。"""
+        """單筆模式：context 與 pairs[0] 合併後直接填入 taskTemplate。pair 欄優先，同名時覆蓋 context。"""     
         # PPI 只有一個 pair，沒有獨立的 pairTemplate，直接把 context 與 pair 欄位攤平餵進 taskTemplate。
         allFieldDict = dict(contextDict)
         if pairs:

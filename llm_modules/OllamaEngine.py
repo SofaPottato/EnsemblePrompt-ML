@@ -10,12 +10,13 @@ from pathlib import Path
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from tqdm.asyncio import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
-from .schemas import LLMAppConfig, LLMTask, ModelName, RawOutput
+from .schemas import PipelineConfig, LLMTask, ModelName, RawOutput
+from .utils import CSV_ENCODING
 
 # raw.csv 欄位順序的單一事實來源；下游讀檔時應據此驗證。
 # 寫入端（_appendCsv）與讀取端（Pipeline.loadCompletedTaskRunIDs）都引用同一常數，
 # 改 schema 只需改這裡一處——但既有 raw.csv 就得刪除，否則欄位對不上會 raise。
-RAW_CSV_SCHEMA: List[str] = [
+RAW_CSV_COLS: List[str] = [
     "model", "promptID", "taskID",
     "systemPrompt", "userPrompt", "rawOutput", "pairs", "context",
 ]
@@ -117,8 +118,8 @@ class LLMEngine:
         self.fileLock = asyncio.Lock()
 
     @classmethod
-    def fromConfig(cls, config: LLMAppConfig, outputFile: Union[str, Path]) -> "LLMEngine":
-        """由 LLMAppConfig 建立 engine，集中映射 config 欄位到引擎建構參數，避免 Pipeline 端硬寫。"""
+    def fromConfig(cls, config: PipelineConfig, outputFile: Union[str, Path]) -> "LLMEngine":
+        """由 PipelineConfig 建立 engine，集中映射 config 欄位到引擎建構參數，避免 Pipeline 端硬寫。"""
         # 把「config → 引擎參數」的對應集中在這個 classmethod，Pipeline 端就不必知道引擎內部需要哪些欄位；之後引擎建構參數變動也只改這裡。
         return cls(
             apiUrl=config.ollamaServer.url,
@@ -160,11 +161,11 @@ class LLMEngine:
             logging_redirect_tqdm():
             # gather 同時啟動所有「模型組」，每組內的任務交錯執行。
             await asyncio.gather(*[
-                self._processModelGroup(modelName, modelTaskList, progressBar)
+                self._processTaskByModel(modelName, modelTaskList, progressBar)
                 for modelName, modelTaskList in tasksByModelDict.items()
             ])
 
-    async def _processModelGroup(self, modelName: ModelName,
+    async def _processTaskByModel(self, modelName: ModelName,
                                  modelTaskList: List[LLMTask],
                                  progressBar: tqdm) -> None:
         """處理單一模型的所有任務；外層 modelConcurrencySemaphore 控制同時載入幾個模型。"""
@@ -194,10 +195,10 @@ class LLMEngine:
                 self.initializedModelSet.add(task.model)
 
             # 先拿結果（失敗也會回 Error 字串而非 raise），再寫檔。
-            rawOutput = await self._safeGenerate(task)
+            rawOutput = await self._tryGenerate(task)
             await self._appendCsv(task, rawOutput)
 
-    async def _safeGenerate(self, task: LLMTask) -> RawOutput:
+    async def _tryGenerate(self, task: LLMTask) -> RawOutput:
         """送出 LLM 請求；例外與空回應都統一回 Error 字串，讓批次能繼續且下游用同方式辨識。"""
         # 單筆失敗「不 raise」，否則 gather 會把整批中斷。改成回 "Error:..." 字串，
         # 讓這筆照常寫進 raw.csv（算「已嘗試/已完成」），下游 OutputParser 看到 "Error:" 標 -1。
@@ -228,9 +229,9 @@ class LLMEngine:
         async with self.fileLock:
 
             b_fileExists = os.path.isfile(self.outputFile)
-            with open(self.outputFile, 'a', encoding='utf-8-sig', newline='') as f:
-                # 固定 fieldnames = RAW_CSV_SCHEMA，保證欄位順序與下游驗證一致
-                csvWriter = csv.DictWriter(f, fieldnames=RAW_CSV_SCHEMA)
+            with open(self.outputFile, 'a', encoding=CSV_ENCODING, newline='') as f:
+                # 固定 fieldnames = RAW_CSV_COLS，保證欄位順序與下游驗證一致
+                csvWriter = csv.DictWriter(f, fieldnames=RAW_CSV_COLS)
                 if not b_fileExists:
                     csvWriter.writeheader()
                 csvWriter.writerow(rowDataDict)

@@ -6,8 +6,6 @@ from typing import Dict, Any, List, Optional, ClassVar, FrozenSet, TypeAlias
 
 # 任何處理 pair 的模組都應引用此常數，避免 'sentID'/'label' 硬編碼散落多處
 # sentID = sentenceID（樣本識別碼；PPI 為句子，BC5CDR 為 entity-pair）
-# 集中一處的好處：PromptFormatter（決定哪些欄進 prompt）與 OutputParser（哪些是核心欄）
-# 共用同一定義，新增內部欄位只改這裡。
 RESERVED_PAIR_FIELDS: FrozenSet[str] = frozenset({'sentID', 'label'})
 
 
@@ -36,7 +34,7 @@ class PathsConfig(BaseModel):
     evalDir:                  Optional[Path] = Field(default=None, description="評估圖表與報表的輸出目錄")
     promptPreviewPath:        Optional[Path] = Field(default=None, description="渲染後的 userPrompt 預覽 CSV 路徑")
 
-    # 各輸出路徑留 None 時的預設檔名；ClassVar 表示這是類別常數、非 model 欄位。
+    # 各輸出路徑留 None 時的預設檔名
     _DEFAULT_NAMES: ClassVar[Dict[str, str]] = {
         'rawOutputPath':            'raw.csv',
         'resultPath':               'result.csv',
@@ -79,9 +77,9 @@ class OllamaServerConfig(BaseModel):
     timeout: int = Field(default=1800, description="API 請求超時時間(秒)")
 
 
-class Classification(BaseModel):
+class LabelSet(BaseModel):
     """
-    分類類別設定。classes 在清單中的索引即為整數標籤 labelCode（0..N-1），未命中一律 -1。
+    標籤集合設定。classes 在清單中的索引即為整數標籤 labelCode（0..N-1），未命中一律 -1。
     Ollama `format` JSON schema 由此產生，強制模型只能輸出 classes 之一。
     gold label 與 classes 的對齊由前處理負責，須完全一致（比對時大小寫不敏感、去空白）。
     """
@@ -90,7 +88,7 @@ class Classification(BaseModel):
         description="分類類別清單；索引即整數 labelCode。二元 [no,yes] 或多分類 [negative,neutral,positive]"
     )
 
-    # 預建的 label→labelCode 對照表（小寫為 key）。PrivateAttr：不是對外欄位、不進序列化，只是查表加速。
+    # 預建的 label→labelCode 對照表（小寫為 key）。
     _labelCodeByLabel: Dict[str, int] = PrivateAttr(default_factory=dict)
 
     @model_validator(mode='after')
@@ -119,15 +117,15 @@ class Classification(BaseModel):
             return -1
         return self._labelCodeByLabel.get(str(label).strip().lower(), -1)
 
-    def buildResponseSchema(self, b_single: bool) -> Dict[str, Any]:
+    def buildResponseSchemaForTask(self, taskType: str) -> Dict[str, Any]:
         """
         產生 Ollama `format` 用的 JSON schema。
-        b_single：單筆預測 {"label": <enum>}；batch：{"answers": [{"id": int, "label": <enum>}]}。
+        taskType="PPI"：單筆預測 {"label": <enum>}；其餘（BC5CDR）：{"answers": [{"id": int, "label": <enum>}]}。
         """
         # 用 enum 把 label 限定成 classes 之一：Ollama 端就會強制模型只輸出這些字串，
         # 大幅減少 OutputParser 要處理的雜訊（少數不遵守的仍由 labelToLabelCode 兜底回 -1）。
         labelProp = {"type": "string", "enum": self.classes}
-        if b_single:
+        if taskType == "PPI":
             return {
                 "type": "object",
                 "properties": {"label": labelProp},
@@ -150,7 +148,7 @@ class Classification(BaseModel):
         }
 
 
-class LLMAppConfig(BaseModel):
+class PipelineConfig(BaseModel):
     """
     Pipeline 設定 Schema。
     taskType="PPI"：每個 task 一個預測標的，需設 labelColumn。
@@ -164,7 +162,7 @@ class LLMAppConfig(BaseModel):
     labelColumn: Optional[str] = Field(default=None, description="PPI 模式下攜帶 true label 的欄位名")
     ollamaServer: OllamaServerConfig = Field(default_factory=OllamaServerConfig)
     llmOptions: Dict[str, Any] = Field(default_factory=lambda: {"temperature": 0}, description="LLM 推論參數")
-    labelSet: Classification = Field(default_factory=Classification, description="分類類別清單（字串陣列，如 ['no','yes']）；索引即整數 labelCode")
+    labelSet: LabelSet = Field(default_factory=LabelSet, description="分類類別清單（字串陣列，如 ['no','yes']）；索引即整數 labelCode")
     maxPairsPerBatch: int = Field(default=1, description="每個 LLM task 包含的 item 數；>1 為批次模式")
     concurrencyPerModel: int = Field(default=8, description="每個模型的最大非同步併發數")
     maxConcurrentModels: int = Field(default=1, description="最大同時運行的模型數量")
@@ -173,11 +171,11 @@ class LLMAppConfig(BaseModel):
 
     @field_validator('labelSet', mode='before')
     @classmethod
-    def _coerceLabelSet(cls, v):
-        """labelSet 寫成字串清單（如 ['no','yes']），於此包成 Classification。"""
+    def _normalizeLabelSet(cls, v):
+        """labelSet 寫成字串清單（如 ['no','yes']），於此包成 LabelSet。"""
         # ergonomic helper：讓 YAML 直接寫 labelSet: ["no","yes"]（而非 labelSet: {classes: [...]}）。
-        # mode='before' 表示在 Pydantic 驗 Classification 之前先攔截、把 list 包成 {'classes': list}。
-        if isinstance(v, Classification):
+        # mode='before' 表示在 Pydantic 驗 LabelSet 之前先攔截、把 list 包成 {'classes': list}。
+        if isinstance(v, LabelSet):
             return v
         if not isinstance(v, list):
             raise ValueError(
@@ -225,8 +223,8 @@ class LLMAppConfig(BaseModel):
     def buildResponseSchema(self) -> Dict[str, Any]:
         """回傳 Ollama `format` JSON schema（PPI → {label}；BC5CDR → {answers:[{id,label}]}）。"""
         # facade：把「模式判定」與「schema 產生」綁在一起，LLMEngine 直接拿結果丟給 Ollama。
-        # b_single 即「是否為 PPI（單標的）」。
-        return self.labelSet.buildResponseSchema(b_single=(self.taskType == "PPI"))
+        # 直接把 taskType 字串傳下去，由 LabelSet 端做字串比對，與下游各處分支一致。
+        return self.labelSet.buildResponseSchemaForTask(taskType=self.taskType)
 
 
 # ── Pipeline 例外體系 ─────────────────────────────────────────────────────
