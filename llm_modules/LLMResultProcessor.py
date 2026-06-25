@@ -3,7 +3,6 @@ import logging
 from pathlib import Path
 from typing import List, Dict
 from .schemas import PipelineError, LabelSet
-from .utils import CSV_ENCODING, CSV_WRITE_KWARGS
 
 
 class LLMResultProcessor:
@@ -47,7 +46,7 @@ class LLMResultProcessor:
         if not self.parsedOutputCsvPath.exists():
             raise PipelineError(f"File not found: {self.parsedOutputCsvPath}")
         try:
-            self.inputDf = pd.read_csv(self.parsedOutputCsvPath, encoding=CSV_ENCODING)
+            self.inputDf = pd.read_csv(self.parsedOutputCsvPath, encoding='utf-8-sig')
         except Exception as e:
             raise PipelineError(f"Failed to read CSV: {e}") from e
 
@@ -117,7 +116,7 @@ class LLMResultProcessor:
         # partialInfo.csv 只保留 sentID、trueLabel、以及預測欄（即 runKey + __pred 後綴）。 
         predCols = [c for c in self.partialDf.columns if c.endswith(self._PRED_SUFFIX)]
         leanCols = [c for c in ('sentID', 'trueLabel') if c in self.partialDf.columns] + predCols
-        self.partialDf[leanCols].to_csv(self.partialInfoCsvPath, **CSV_WRITE_KWARGS)
+        self.partialDf[leanCols].to_csv(self.partialInfoCsvPath, index=False, encoding='utf-8-sig')
 
     def _saveFullInfoCsv(self) -> None:
         """完整版：補 {runKey}__sysPrompt 欄 → 欄位重排 → 寫檔。"""
@@ -147,7 +146,7 @@ class LLMResultProcessor:
         idCols = [c for c in ('sentID',) if c in indexCols]
         otherIndexCols = [c for c in indexCols if c not in labelCols and c not in idCols]
         orderedCols = idCols + labelCols + rawCols + predCols + sysPromptCols + otherIndexCols
-        self.fullDf[orderedCols].to_csv(self.fullInfoCsvPath, **CSV_WRITE_KWARGS)
+        self.fullDf[orderedCols].to_csv(self.fullInfoCsvPath, index=False, encoding='utf-8-sig')
 
     def _logSummary(self) -> None:
         """輸出 parse rate 與 partial / full 兩張寬表的 shape 資訊。"""

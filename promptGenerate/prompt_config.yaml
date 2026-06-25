@@ -3,11 +3,11 @@
 # =========================================================
 # 來源 Prompt 方法池檔案 (YAML)。
 # 此檔案定義所有可用的 Prompt 方法分類 (method) 及其項目，
-promptYamlPath: "promptGenerate/prompts.yaml"
+promptYamlPath: "promptGenerate/bc5cdr_prompts.yaml"
 
 # 輸出的 Prompt 組合 CSV (相對路徑，含檔名與副檔名)。
-# 即下游 pipeline config 中 paths.promptCmbPath 所讀取的檔案。
-promptCmbOutputPath: "data/promptOutput/example_prompts.csv"
+# 即 downstream pipeline config 中 paths.promptCmbPath 所讀取的檔案。
+promptCmbOutputPath: "data/promptOutput/bc5cdr_prompts.csv"
 # =========================================================
 # Prompt 生成模式設定
 # =========================================================

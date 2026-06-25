@@ -6,7 +6,7 @@ BC5CDR 資料集前處理腳本。
   - taskID:    批次層級識別碼，格式為 PMID（依 PMID 分組，每組一筆 task）
   - title:     文章標題（對應 taskTemplate 的 {title} 佔位符）
   - abstract:  文章摘要（對應 taskTemplate 的 {abstract} 佔位符）
-  - pairs:     JSON array，包含該 PMID 下所有 entity pair（sentID/label/e1/e2）
+  - items:     JSON array，包含該 PMID 下所有 entity pair（sentID/label/e1/e2）
 
 使用方式：
   python preprocess/bc5cdr.py
@@ -32,7 +32,7 @@ def preprocess():
     tasks = []
     for pmid, group in df.groupby('PMID', sort=False):
         # gold label 須與 config.labelSet.classes (["no", "yes"]) 完全對齊：CID → yes
-        pairs = [
+        items = [
             {
                 'sentID': str(row['ID']),
                 'label':  "yes" if str(row['Relation_Type']).strip().upper() == "CID" else "no",
@@ -45,7 +45,7 @@ def preprocess():
             'taskID':   str(pmid),
             'title':    str(group.iloc[0]['Title']),
             'abstract': str(group.iloc[0]['Abstract']),
-            'pairs':    json.dumps(pairs, ensure_ascii=False)
+            'items':    json.dumps(items, ensure_ascii=False)
         })
 
     outPath = Path(OUTPUT_PATH)

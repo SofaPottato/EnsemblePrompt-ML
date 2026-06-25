@@ -30,16 +30,20 @@ taskTemplate: |
   For each pair, answer with exactly one of the allowed labels: no, yes.
 
   Pairs to analyze:
-  {pairs}
+  {items}
 
-pairColumns: ["e1", "e2"]
-pairTemplate: |
+itemColumns: ["e1", "e2"]
+itemTemplate: |
   {i}: Chemical: {e1} | Disease: {e2}
 # --- 分類設定 ---
 # 二元範例: ["True","False"]　多分類範例: ["negative","neutral","positive"]
-taskType: "BC5CDR"        # 推論模式：'PPI'或 'BC5CDR'
 labelSet: ["no", "yes"]
-maxPairsPerBatch: 10      # 每個 LLM task 包含的 item 數
+taskType: "BC5CDR"        # 推論模式：'PPI'或 'BC5CDR'
+#    taskType        | 必要欄位
+#    "PPI"	         |taskID + labelColumn + 所有 contextColumns
+#    "BC5CDR"（else} |taskID + items + 所有 contextColumns
+#    之後有新資料集再擴充對應的必要欄位組合。
+maxItemsPerBatch: 10      # 每個 LLM task 包含的 item 數
 
 
 
@@ -49,7 +53,7 @@ maxPairsPerBatch: 10      # 每個 LLM task 包含的 item 數
 selectedModels: ["llama3.2:1b"]
 ollamaServer:
   url:     "http://localhost:11434/api/chat"
-  timeout: 600 #多久會停止等待 Ollama 回應（秒）
+  timeout: 600 
 
 # --- 推論參數 ---
 llmOptions:
@@ -57,7 +61,6 @@ llmOptions:
   num_predict:    512
   num_ctx:        8192
   num_gpu:        99
-  repeat_penalty: 1.1  # 重複懲罰係數；>1 抑制重複輸出
 
 # --- 並發控制 ---
 concurrencyPerModel: 2 #每個模型同時處理多少個 task（不含 Ollama 內部的並發控制）

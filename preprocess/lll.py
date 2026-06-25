@@ -8,7 +8,7 @@ LLL 原始欄位：
 標準 Task CSV 欄位（輸出，PPI 格式）：
   - taskID:  唯一識別碼，使用 passageid + row index
   - passage: 單句文本（對應 taskTemplate 的 {passage} 佔位符）
-  - label:   true label 字串（對應 config.labelColumn，由 Pipeline 自動包成 pairs）
+  - label:   true label 字串（對應 config.labelColumn，由 Pipeline 自動包成 items）
 
 使用方式：
   python preprocess/lll.py

@@ -4,9 +4,9 @@ from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_valid
 from typing import Dict, Any, List, Optional, ClassVar, FrozenSet, TypeAlias
 
 
-# 任何處理 pair 的模組都應引用此常數，避免 'sentID'/'label' 硬編碼散落多處
+# 任何處理 item 的模組都應引用此常數，避免 'sentID'/'label' 硬編碼散落多處
 # sentID = sentenceID（樣本識別碼；PPI 為句子，BC5CDR 為 entity-pair）
-RESERVED_PAIR_FIELDS: FrozenSet[str] = frozenset({'sentID', 'label'})
+RESERVED_ITEM_FIELDS: FrozenSet[str] = frozenset({'sentID', 'label'})
 
 
 # ── 語意化型別別名：純為提升可讀性與 IDE 提示，型別檢查器仍視為 str ──────────
@@ -19,7 +19,7 @@ RawOutput: TypeAlias = str   # LLM 原始文字回應（未解析）
 # ── Config schema（依組合關係排序）───────────────────────────────
 class PathsConfig(BaseModel):
     """
-    路徑設定。輸出路徑未填時依 _DEFAULT_NAMES 衍生到 outputRoot；
+    路徑設定。輸出路徑未填時依 _DEFAULT_OUTPUT_NAMES 衍生到 outputRoot；
     相對路徑視為相對 outputRoot；絕對路徑原樣使用。
     """
     taskCsvPath:   Path = Field(..., description="前處理產出的標準 Task CSV 路徑")
@@ -35,7 +35,7 @@ class PathsConfig(BaseModel):
     promptPreviewPath:        Optional[Path] = Field(default=None, description="渲染後的 userPrompt 預覽 CSV 路徑")
 
     # 各輸出路徑留 None 時的預設檔名
-    _DEFAULT_NAMES: ClassVar[Dict[str, str]] = {
+    _DEFAULT_OUTPUT_NAMES: ClassVar[Dict[str, str]] = {
         'rawOutputPath':            'raw.csv',
         'resultPath':               'result.csv',
         'singlePromptCmbOutputDir': 'singleOutput',
@@ -46,11 +46,11 @@ class PathsConfig(BaseModel):
     }
 
     @model_validator(mode='after')
-    def resolveAndEnsureDirectories(self):
+    def checkAndMakeDir(self):
         """依 outputRoot 解析所有輸出路徑（None/相對/絕對三種情形），並統一 mkdir。"""
         # 三種情形統一解析：None → 套預設檔名；相對路徑 → 接到 outputRoot 下；絕對路徑 → 原樣。
         # 在 config 載入時就 resolve 完，下游拿到的路徑一律是絕對且可直接用。
-        for name, default in self._DEFAULT_NAMES.items():
+        for name, default in self._DEFAULT_OUTPUT_NAMES.items():
             current: Optional[Path] = getattr(self, name)
             if current is None:
                 resolved = self.outputRoot / default
@@ -92,7 +92,7 @@ class LabelSet(BaseModel):
     _labelCodeByLabel: Dict[str, int] = PrivateAttr(default_factory=dict)
 
     @model_validator(mode='after')
-    def validateAndIndexClasses(self):
+    def checkLabelSet(self):
         """去空白、檢查非空 / 不重複（大小寫不敏感）/ 至少 2 類，並預建 label→labelCode 對照表。"""
         # 先去空白，再做三項健全性檢查：空字串、大小寫不敏感重複、至少 2 類——
         # 這些都是會讓 labelCode 對應出錯卻不易察覺的設定問題，故在載入期就擋下。
@@ -117,7 +117,7 @@ class LabelSet(BaseModel):
             return -1
         return self._labelCodeByLabel.get(str(label).strip().lower(), -1)
 
-    def buildResponseSchemaForTask(self, taskType: str) -> Dict[str, Any]:
+    def buildOllamaOutputFormat(self, taskType: str) -> Dict[str, Any]:
         """
         產生 Ollama `format` 用的 JSON schema。
         taskType="PPI"：單筆預測 {"label": <enum>}；其餘（BC5CDR）：{"answers": [{"id": int, "label": <enum>}]}。
@@ -152,22 +152,22 @@ class PipelineConfig(BaseModel):
     """
     Pipeline 設定 Schema。
     taskType="PPI"：每個 task 一個預測標的，需設 labelColumn。
-    taskType="BC5CDR"：每個 task 多個預測標的，需設 pairTemplate。
+    taskType="BC5CDR"：每個 task 多個預測標的，需設 itemTemplate。
     """
     paths: PathsConfig
     taskType: str = Field(..., description="資料集類型，決定推論模式：'PPI' 或 'BC5CDR'")
     selectedModels: List[str] = Field(default_factory=list, description="要進行測試的 LLM 模型清單")
     contextColumns: List[str] = Field(default_factory=list, description="Task CSV 中作為 context 的欄位名稱")
-    pairColumns: List[str] = Field(default_factory=list, description="pairs JSON 中對應 pairTemplate 佔位符的欄位名稱")
+    itemColumns: List[str] = Field(default_factory=list, description="items JSON 中對應 itemTemplate 佔位符的欄位名稱")
     labelColumn: Optional[str] = Field(default=None, description="PPI 模式下攜帶 true label 的欄位名")
     ollamaServer: OllamaServerConfig = Field(default_factory=OllamaServerConfig)
     llmOptions: Dict[str, Any] = Field(default_factory=lambda: {"temperature": 0}, description="LLM 推論參數")
     labelSet: LabelSet = Field(default_factory=LabelSet, description="分類類別清單（字串陣列，如 ['no','yes']）；索引即整數 labelCode")
-    maxPairsPerBatch: int = Field(default=1, description="每個 LLM task 包含的 item 數；>1 為批次模式")
+    maxItemsPerBatch: int = Field(default=1, ge=1, description="每個 LLM task 包含的 item 數；>1 為批次模式")
     concurrencyPerModel: int = Field(default=8, description="每個模型的最大非同步併發數")
     maxConcurrentModels: int = Field(default=1, description="最大同時運行的模型數量")
-    taskTemplate: str = Field(..., description="組裝 userPrompt 的文字模板；{key} 對應 context 欄位，{pairs} 對應批次展開")
-    pairTemplate: Optional[str] = Field(default=None, description="單筆 pair 的格式化模板；不設定代表單筆模式")
+    taskTemplate: str = Field(..., description="組裝 userPrompt 的文字模板；{key} 對應 context 欄位，{items} 對應批次展開")
+    itemTemplate: Optional[str] = Field(default=None, description="單筆 item 的格式化模板；不設定代表單筆模式")
 
     @field_validator('labelSet', mode='before')
     @classmethod
@@ -185,7 +185,7 @@ class PipelineConfig(BaseModel):
 
     @model_validator(mode='after')
     def validateTaskMode(self):
-        """taskType 一致性檢查：必填欄位、禁用欄位、maxPairsPerBatch 限制。"""
+        """taskType 一致性檢查：必填欄位、禁用欄位、maxItemsPerBatch 限制。"""
         # 這裡是 taskType 的合法值把關點：通過後，下游（loadTaskData / _buildTaskBatches）就能信任
         # taskType ∈ {PPI, BC5CDR}，PPI 以外一律當 BC5CDR，不必再寫不可達的第三分支。
         if self.taskType not in ("PPI", "BC5CDR"):
@@ -194,37 +194,44 @@ class PipelineConfig(BaseModel):
             )
         if self.taskType == "PPI":
             # PPI 三條硬規則：
-            #  - 必須有 labelColumn（gold label 的來源欄）。
-            #  - 不該有 pairTemplate（PPI 沒有 pair 概念，設了代表用錯模式）。
-            #  - maxPairsPerBatch 必為 1（強加 batch 概念只會讓下游邏輯複雜化卻無收益）。
+            #  - 必須有 labelColumn（true label 的來源欄）。
+            #  - 不該有 itemTemplate（PPI 沒有 item 概念，設了代表用錯模式）。
+            #  - maxItemsPerBatch 必為 1（強加 batch 概念只會讓下游邏輯複雜化卻無收益）。
             if not self.labelColumn:
                 raise ValueError(
                     "PPI 模式必須設定 labelColumn，"
                     "用於指定 Task CSV 中攜帶 true label 的欄位名。"
                 )
-            if self.pairTemplate is not None:
+            if self.itemTemplate is not None:
                 raise ValueError(
-                    "PPI 模式不應設定 pairTemplate。"
-                    "若資料集為一篇多 pair，請將 taskType 改為 'BC5CDR' 並設定 pairColumns。"
+                    "PPI 模式不應設定 itemTemplate。"
+                    "若資料集為一篇多 item，請將 taskType 改為 'BC5CDR' 並設定 itemColumns。"
                 )
-            if self.maxPairsPerBatch != 1:
+            if self.maxItemsPerBatch != 1:
                 raise ValueError(
-                    f"PPI 模式下 maxPairsPerBatch 必須為 1，目前為 {self.maxPairsPerBatch}。"
+                    f"PPI 模式下 maxItemsPerBatch 必須為 1，目前為 {self.maxItemsPerBatch}。"
                 )
         else:
-            # BC5CDR：一定要有 pairTemplate，否則 pair 無法渲染進 userPrompt。
-            if not self.pairTemplate:
+            # BC5CDR：一定要有 itemTemplate，否則 item 無法渲染進 userPrompt。
+            if not self.itemTemplate:
                 raise ValueError(
-                    "BC5CDR 模式必須提供 pairTemplate，"
-                    "否則無法將 pair 渲染進 userPrompt。"
+                    "BC5CDR 模式必須提供 itemTemplate，"
+                    "否則無法將 item 渲染進 userPrompt。"
+                )
+            # taskTemplate 必須含 {items} 佔位符：渲染好的 item 內容是當成 {items} 值塞進去的，
+            # 少了它 format_map 會把整段 items 默默丟掉、模型完全看不到 item → fail-fast。
+            if "{items}" not in self.taskTemplate:
+                raise ValueError(
+                    "BC5CDR 模式的 taskTemplate 必須包含 {items} 佔位符，"
+                    "否則展開後的 item 內容無法填入 userPrompt。"
                 )
         return self
 
-    def buildResponseSchema(self) -> Dict[str, Any]:
+    def buildResponseFormat(self) -> Dict[str, Any]:
         """回傳 Ollama `format` JSON schema（PPI → {label}；BC5CDR → {answers:[{id,label}]}）。"""
         # facade：把「模式判定」與「schema 產生」綁在一起，LLMEngine 直接拿結果丟給 Ollama。
         # 直接把 taskType 字串傳下去，由 LabelSet 端做字串比對，與下游各處分支一致。
-        return self.labelSet.buildResponseSchemaForTask(taskType=self.taskType)
+        return self.labelSet.buildOllamaOutputFormat(taskType=self.taskType)
 
 
 # ── Pipeline 例外體系 ─────────────────────────────────────────────────────
@@ -264,5 +271,5 @@ class LLMTask(BaseModel):
     promptID:  PromptID  = Field(..., min_length=1, description="Prompt 策略識別碼")
     sysPrompt: str       = Field(default="", description="系統提示詞")
     userPrompt: str      = Field(..., min_length=1, description="使用者提示詞")
-    pairs: List[Dict[str, Any]] = Field(default_factory=list, description="此任務包含的 pair 清單（含 sentID/label）")
+    items: List[Dict[str, Any]] = Field(default_factory=list, description="此任務包含的 item 清單（含 sentID/label）")
     context: Dict[str, Any] = Field(default_factory=dict, description="Task 層級 context 欄位")

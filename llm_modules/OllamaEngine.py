@@ -11,14 +11,13 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 from tqdm.asyncio import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
 from .schemas import PipelineConfig, LLMTask, ModelName, RawOutput
-from .utils import CSV_ENCODING
 
 # raw.csv 欄位順序的單一事實來源；下游讀檔時應據此驗證。
 # 寫入端（_appendCsv）與讀取端（Pipeline.loadCompletedTaskRunIDs）都引用同一常數，
 # 改 schema 只需改這裡一處——但既有 raw.csv 就得刪除，否則欄位對不上會 raise。
 RAW_CSV_COLS: List[str] = [
     "model", "promptID", "taskID",
-    "systemPrompt", "userPrompt", "rawOutput", "pairs", "context",
+    "systemPrompt", "userPrompt", "rawOutput", "items", "context",
 ]
 
 # raw.csv 用來判斷任務是否已完成的 composite key 欄位（對應 TaskRunID 三元組）。
@@ -128,7 +127,7 @@ class LLMEngine:
             concurrencyPerModel=config.concurrencyPerModel,
             maxConcurrentModels=config.maxConcurrentModels,
             outputFile=str(outputFile),
-            responseFormat=config.buildResponseSchema(),
+            responseFormat=config.buildResponseFormat(),
         )
 
     # ── Step 1: 全批次調度（公開入口）────────────────────────────────────
@@ -221,7 +220,7 @@ class LLMEngine:
             "systemPrompt": task.sysPrompt,
             "userPrompt":   task.userPrompt,
             "rawOutput":    rawOutput,
-            "pairs":        json.dumps(task.pairs, ensure_ascii=False),
+            "items":        json.dumps(task.items, ensure_ascii=False),
             "context":      json.dumps(task.context, ensure_ascii=False),
         }
 
@@ -229,7 +228,7 @@ class LLMEngine:
         async with self.fileLock:
 
             b_fileExists = os.path.isfile(self.outputFile)
-            with open(self.outputFile, 'a', encoding=CSV_ENCODING, newline='') as f:
+            with open(self.outputFile, 'a', encoding='utf-8-sig', newline='') as f:
                 # 固定 fieldnames = RAW_CSV_COLS，保證欄位順序與下游驗證一致
                 csvWriter = csv.DictWriter(f, fieldnames=RAW_CSV_COLS)
                 if not b_fileExists:

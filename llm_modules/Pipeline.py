@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 from dataclasses import dataclass
 from typing import List, Set, Dict, Any
@@ -9,7 +10,6 @@ from .OutputParser import OutputParser
 from .LLMResultProcessor import LLMResultProcessor
 from .Evaluate import PromptCmbEval
 from .PromptFormatter import PromptFormatter
-from .utils import parseJsonCell, CSV_ENCODING, CSV_WRITE_KWARGS
 from .schemas import (
     DataLoadError,
     TaskBuildError,
@@ -31,7 +31,7 @@ class Prompt:
 @dataclass
 class TaskBatch:
     taskID: TaskID
-    pairList: List[Dict[str, Any]]
+    itemList: List[Dict[str, Any]]
     userPrompt: str
     contextDict: Dict[str, Any]
 
@@ -59,8 +59,8 @@ class ExperimentPipeline:
         self.pathConfig = config.paths
         self.promptFormatter = PromptFormatter(
             config.taskTemplate,
-            config.pairTemplate,
-            config.pairColumns or None,
+            config.itemTemplate,
+            config.itemColumns or None,
         )
         logging.info(f"[Pipeline] 初始化完成: outputRoot={self.pathConfig.outputRoot}")
 
@@ -129,24 +129,29 @@ class ExperimentPipeline:
         """
         載入 Task CSV 並驗證必要欄位。
         PPI 需有 taskID + labelColumn + contextColumns；
-        BC5CDR 需有 taskID + pairs + contextColumns。
+        BC5CDR 需有 taskID + items + contextColumns。
         """
         csvPath = self.pathConfig.taskCsvPath
         if not csvPath.exists():
             raise DataLoadError(f"找不到 Task CSV: {csvPath}")
-
-        taskDf = pd.read_csv(csvPath, encoding=CSV_ENCODING)
-        # taskType 已由 PipelineConfig.validateTaskMode 限定為 PPI / BC5CDR，之後有新資料集再擴充對應的必要欄位組合。
+        
+        taskDf = pd.read_csv(csvPath, encoding='utf-8-sig')
+        
         if self.config.taskType == "PPI":
             requiredColSet = {'taskID', self.config.labelColumn} | set(self.config.contextColumns)
         else:
-            requiredColSet = {'taskID', 'pairs'} | set(self.config.contextColumns)
-
-        # 用 set 差集找缺漏欄，錯誤訊息直接列出缺哪些，方便對照前處理輸出。
+            requiredColSet = {'taskID', 'items'} | set(self.config.contextColumns)
+            
+        #    taskType        | 必要欄位
+        #    "PPI"	         |taskID + labelColumn + 所有 contextColumns
+        #    "BC5CDR"（else} |taskID + items + 所有 contextColumns
+        # 之後有新資料集再擴充對應的必要欄位組合。
+        
         missingColSet = requiredColSet - set(taskDf.columns)
         if missingColSet:
             raise DataLoadError(f"Task CSV 缺少必要欄位: {missingColSet}")
-
+        # 用 set 差集找缺漏欄，錯誤訊息直接列出缺哪些，方便對照前處理輸出。
+        
         logging.info(f"[Loader] Task CSV 載入完成: {len(taskDf)} 筆 from {csvPath}")
         return taskDf
 
@@ -156,7 +161,7 @@ class ExperimentPipeline:
         if not csvPath.exists():
             raise DataLoadError(f"找不到 Prompt 組合檔案: {csvPath}")
 
-        promptDf = pd.read_csv(csvPath, encoding=CSV_ENCODING)
+        promptDf = pd.read_csv(csvPath, encoding='utf-8-sig')
         if 'promptID' not in promptDf.columns or 'promptText' not in promptDf.columns:
             raise DataLoadError("Prompt CSV 缺少 'promptID' 或 'promptText' 欄位。")
 
@@ -176,7 +181,7 @@ class ExperimentPipeline:
             return completedTaskRunIDSet
 
         try:
-            rawDf = pd.read_csv(csvPath, encoding=CSV_ENCODING)
+            rawDf = pd.read_csv(csvPath, encoding='utf-8-sig')
         except (pd.errors.ParserError, pd.errors.EmptyDataError, OSError, UnicodeDecodeError) as e:
             raise DataLoadError(
                 f"raw.csv 讀取失敗（壞檔或編碼問題）: {e}。"
@@ -219,7 +224,7 @@ class ExperimentPipeline:
                 })
 
         csvPath = self.pathConfig.promptPreviewPath
-        pd.DataFrame(previewRecordList).to_csv(str(csvPath), **CSV_WRITE_KWARGS)
+        pd.DataFrame(previewRecordList).to_csv(str(csvPath), index=False, encoding='utf-8-sig')
         logging.info(f"[Loader] Prompt preview 已寫入: {len(previewRecordList)} 筆 → {csvPath}")
 
     def buildPendingTasks(self,
@@ -255,7 +260,7 @@ class ExperimentPipeline:
                         promptID=prompt.promptID,
                         sysPrompt=prompt.promptText,
                         userPrompt=taskBatch.userPrompt,
-                        pairs=taskBatch.pairList,
+                        items=taskBatch.itemList,
                         context=taskBatch.contextDict,
                     ))
 
@@ -266,33 +271,33 @@ class ExperimentPipeline:
 
     def _validateLabels(self, taskBatchList: List[TaskBatch]) -> None:
         """
-        在攤平後的 pairList 上做一次性對齊檢查，PPI / BC5CDR 共用同一條路徑。
-        任何 pair 缺 'label' 欄、或 'label' 對不到 labelSet.classes 即 fail-fast，
+        在攤平後的 itemList 上做一次性對齊檢查，PPI / BC5CDR 共用同一條路徑。
+        任何 item 缺 'label' 欄、或 'label' 對不到 labelSet.classes 即 fail-fast，
         作為 trueLabel 的唯一把關點，避免錯誤組態浪費整輪 inference，下游階段只負責轉碼。
         """
         labelSet = self.config.labelSet
 
-        # 缺 'label' 欄的 pair 無 gold label 可評估，視為資料錯誤直接擋下
-        # 用 taskID 去重回報（缺 label 的 pair 根本沒有值可列），方便定位是哪些 task 出問題。
+        # 缺 'label' 欄的 item 無 true label 可評估，視為資料錯誤直接擋下
+        # 用 taskID 去重回報（缺 label 的 item 根本沒有值可列），方便定位是哪些 task 出問題。
         missingLabelTaskIDSet = {
             batch.taskID
             for batch in taskBatchList
-            for pair in batch.pairList
-            if 'label' not in pair
+            for item in batch.itemList
+            if 'label' not in item
         }
         if missingLabelTaskIDSet:
             samplePreview = sorted(missingLabelTaskIDSet)[:5]
             raise DataLoadError(
-                f"Task CSV 內共 {len(missingLabelTaskIDSet)} 個 task 的 pair 缺少 'label' 欄，無法評估。"
+                f"Task CSV 內共 {len(missingLabelTaskIDSet)} 個 task 的 item 缺少 'label' 欄，無法評估。"
                 f"涉及 taskID（前 5）：{samplePreview}。請檢查前處理輸出。"
             )
 
         # 第二段：label 值對不到 classes。只列前 5 個，讓使用者判斷是哪些Label。
         unknownSet = {
-            pair['label']
+            item['label']
             for batch in taskBatchList
-            for pair in batch.pairList
-            if labelSet.labelToLabelCode(pair['label']) == -1
+            for item in batch.itemList
+            if labelSet.labelToLabelCode(item['label']) == -1
         }
         if unknownSet:
             samplePreview = sorted(str(v) for v in unknownSet)[:5]
@@ -301,11 +306,27 @@ class ExperimentPipeline:
                 f"{samplePreview}。請檢查前處理輸出或 config 的 labelSet 是否一致（比對為去空白、大小寫不敏感）。"
             )
 
+    @staticmethod
+    def _parseJsonCell(value: Any, fieldName: str, taskID: str) -> Any:
+        """
+        解析 Task CSV 的 JSON 欄位字串。
+        None / NaN → raise TaskBuildError；其他非字串 → 原樣回傳；字串 → json.loads（失敗往上拋）。
+        """
+        # 正常路徑：pandas 讀進來的 JSON 欄位是字串，直接交給 json.loads；
+        # 解析失敗讓 JSONDecodeError 往上冒，因為壞掉的 items 沒有合理的預設值。
+        if isinstance(value, str):
+            return json.loads(value)
+        # 空欄（None / NaN）代表這筆 task 根本沒有 pair 可跑 → fail-fast，附上 taskID 方便定位。
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            raise TaskBuildError(f"Task {taskID} 的欄位 '{fieldName}' 為空。")
+        # 已是 list/dict（程式式呼叫、非從 CSV 讀）→ 原樣回傳，不重複解析。
+        return value
+
     def _buildTaskBatches(self, taskDf: pd.DataFrame) -> List[TaskBatch]:
         """
-        將 Task CSV 每列預處理成 TaskBatch（parse JSON、依 maxPairsPerBatch 切片、format userPrompt）。
+        將 Task CSV 每列預處理成 TaskBatch（parse JSON、依 maxItemsPerBatch 切片、format userPrompt）。
         """
-        maxPairsPerBatch = self.config.maxPairsPerBatch
+        maxItemsPerBatch = self.config.maxItemsPerBatch
         taskType = self.config.taskType
         labelColumn = self.config.labelColumn
         taskBatchList: List[TaskBatch] = []
@@ -313,28 +334,28 @@ class ExperimentPipeline:
         for _, row in taskDf.iterrows():
             baseTaskID = str(row['taskID'])
             taskContextDict: Dict[str, Any] = {col: row[col] for col in self.config.contextColumns}
-            # 兩種模式攤平成「同一種 pairList 結構」，後續切片/渲染就能共用同一條路徑：
+            # 兩種模式攤平成「同一種 itemList 結構」，後續切片/渲染就能共用同一條路徑：
             #  - PPI：把單一 labelColumn 包成單元素 list（型別與 multi 一致）。
-            #  - BC5CDR：解析 pairs JSON 欄成 list。
+            #  - BC5CDR：解析 items JSON 欄成 list。
             # taskType 已於 config 驗證階段限定，PPI 以外即 BC5CDR
             if taskType == "PPI":
-                allLabelPairList: List[Dict[str, Any]] = [{'label': row[labelColumn]}]
+                allItemList: List[Dict[str, Any]] = [{'label': row[labelColumn]}]
             else:
-                allLabelPairList = parseJsonCell(row['pairs'], 'pairs', baseTaskID)
+                allItemList = self._parseJsonCell(row['items'], 'items', baseTaskID)
             # 之後如果要新增資料集格式可以在這裡，但一定要有taskID與contextcolumn
-            # 依 maxPairsPerBatch 切片，每片產生一個 TaskBatch；PPI 因 maxPairsPerBatch=1 永遠只切出 1 片。
-            for offset in range(0, len(allLabelPairList), maxPairsPerBatch):
-                batchLabelPairList = allLabelPairList[offset:offset + maxPairsPerBatch]
-                # 有切片（pair 數 > 一批容量）才在 taskID 加 _offset 區分；否則沿用原 taskID。
+            # 依 maxItemsPerBatch 切片，每片產生一個 TaskBatch；PPI 因 maxItemsPerBatch=1 永遠只切出 1 片。
+            for offset in range(0, len(allItemList), maxItemsPerBatch):
+                batchItemList = allItemList[offset:offset + maxItemsPerBatch]
+                # 有切片（item 數 > 一批容量）才在 taskID 加 _offset 區分；否則沿用原 taskID。
                 batchTaskID = (
                     f"{baseTaskID}_{offset}"
-                    if len(allLabelPairList) > maxPairsPerBatch
+                    if len(allItemList) > maxItemsPerBatch
                     else baseTaskID
                 )
                 # 在建構期把字串渲染做完，inference 階段只負責拿渲染好的 prompt 丟給 LLM。
-                userPrompt = self.promptFormatter.format(taskContextDict, batchLabelPairList)
+                userPrompt = self.promptFormatter.format(taskContextDict, batchItemList)
                 taskBatchList.append(
-                    TaskBatch(batchTaskID, batchLabelPairList, userPrompt, taskContextDict)
+                    TaskBatch(batchTaskID, batchItemList, userPrompt, taskContextDict)
                 )
 
         return taskBatchList

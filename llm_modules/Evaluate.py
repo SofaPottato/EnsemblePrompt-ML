@@ -6,7 +6,7 @@ from matplotlib.colors import ListedColormap
 import logging
 from pathlib import Path
 from sklearn.metrics import confusion_matrix, accuracy_score, precision_score, recall_score, f1_score, matthews_corrcoef
-from .utils import sanitizeFilename, CSV_ENCODING, CSV_WRITE_KWARGS
+from pathvalidate import sanitize_filename
 from .schemas import LabelSet
 
 
@@ -58,7 +58,7 @@ class PromptCmbEval:
         if not self.partialInfoCsvPath.exists():
             raise FileNotFoundError(f"Eval input CSV not found: {self.partialInfoCsvPath}")
 
-        self.inputDf = pd.read_csv(str(self.partialInfoCsvPath), encoding=CSV_ENCODING)
+        self.inputDf = pd.read_csv(str(self.partialInfoCsvPath), encoding='utf-8-sig')
 
         self.idCols = ['sentID']
         self.predCols = [col for col in self.inputDf.columns if col not in ('trueLabel', 'sentID')]
@@ -85,8 +85,8 @@ class PromptCmbEval:
 
         correctnessByCol = {}
         for predColName in self.predCols:
-            # 指標只用有效預測：整欄都 -1（該 runKey 全解析失敗）→ getValidPair 回 None，跳過指標。
-            validLabelsTuple = self._getValidPair(predColName)
+            # 指標只用有效預測：整欄都 -1（該 runKey 全解析失敗）→ getValidLabelSeries 回 None，跳過指標。
+            validLabelsTuple = self._getValidLabelSeries(predColName)
             if validLabelsTuple is None:
                 logging.warning(f"[Eval] 跳過 {predColName}: 無有效預測 (predLabel ∉ classes 索引 0..N-1)")
                 continue
@@ -159,7 +159,7 @@ class PromptCmbEval:
         logging.info("[Eval] 繪製混淆矩陣中")
 
         for predColName in self.predCols:
-            validLabelsTuple = self._getValidPair(predColName)
+            validLabelsTuple = self._getValidLabelSeries(predColName)
             if validLabelsTuple is None:
                 continue
             yTrueValidSeries, yPredValidSeries = validLabelsTuple
@@ -178,7 +178,7 @@ class PromptCmbEval:
             plt.xlabel('Predicted')
             plt.tight_layout()
 
-            savePath = self.plotsDirPath / f"CM{sanitizeFilename(displayName)}.png"
+            savePath = self.plotsDirPath / f"CM{sanitize_filename(str(displayName), replacement_text='_').replace('+', '_').replace(' ', '_')}.png"
             plt.savefig(str(savePath), bbox_inches='tight')
             plt.close()
 
@@ -210,16 +210,16 @@ class PromptCmbEval:
             upperBoundRow = {col: "" for col in summaryDf.columns}
             upperBoundRow["modelPromptID"] = f"upperBound: {self.upperBound:.2%}"
             summaryDf = pd.concat([summaryDf, pd.DataFrame([upperBoundRow])], ignore_index=True)
-            summaryDf.to_csv(str(self.outputDirPath / "evalSummary.csv"), **CSV_WRITE_KWARGS)
+            summaryDf.to_csv(str(self.outputDirPath / "evalSummary.csv"), index=False, encoding='utf-8-sig')
 
         if self.hardSamplesDf is not None:
-            self.hardSamplesDf.to_csv(str(self.outputDirPath / "samplesToReview.csv"), **CSV_WRITE_KWARGS)
+            self.hardSamplesDf.to_csv(str(self.outputDirPath / "samplesToReview.csv"), index=False, encoding='utf-8-sig')
 
         logging.info(f"[Eval] 所有結果已儲存 → {self.outputDirPath}")
 
     # ── 工具方法 ──────────────────────────────────────────────────────────────
 
-    def _getValidPair(self, col: str):
+    def _getValidLabelSeries(self, col: str):
         """回傳 (yTrueValidSeries, yPredValidSeries)，若無有效預測（值不在 classes 索引）則 None。"""
         # 用 isin(_validLabels) 做遮罩濾掉 -1：同時套用到 true 與 pred，確保兩邊對齊同一批樣本。
         # 整欄都無效（全 -1）→ 回 None，呼叫端據此跳過該 runKey 的指標/繪圖。

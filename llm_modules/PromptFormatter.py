@@ -1,6 +1,6 @@
 from string import Formatter
 from typing import Dict, List, Optional
-from .schemas import RESERVED_PAIR_FIELDS
+from .schemas import RESERVED_ITEM_FIELDS
 
 
 def _safeFormat(template: str, fields: Dict) -> str:
@@ -20,44 +20,44 @@ def _safeFormat(template: str, fields: Dict) -> str:
 
 class PromptFormatter:
     """
-    將 context 與 pairs 填入 taskTemplate / pairTemplate，產出 userPrompt。
-    pairTemplate 存在 
-    → 批次模式（多 pair 展開後塞入 {pairs}）。
-    → 單筆模式（context + pairs[0] 合併填入）。
+    將 context 與 items 填入 taskTemplate / itemTemplate，產出 userPrompt。
+    itemTemplate 存在
+    → 批次模式（多 item 展開後塞入 {items}）。
+    → 單筆模式（context + items[0] 合併填入）。
     """
-    def __init__(self, taskTemplate: str, pairTemplate: Optional[str] = None,
-                 pairColumns: Optional[List[str]] = None):
+    def __init__(self, taskTemplate: str, itemTemplate: Optional[str] = None,
+                 itemColumns: Optional[List[str]] = None):
         self.taskTemplate = taskTemplate
-        self.pairTemplate = pairTemplate
-        self.pairColumns = pairColumns
+        self.itemTemplate = itemTemplate
+        self.itemColumns = itemColumns
 
-    def format(self, contextDict: Dict, pairs: List[Dict]) -> str:
-        """pairTemplate 存在 → 批次模式；否則 → 單筆模式。"""
-        if self.pairTemplate:
-            return self._formatBatch(contextDict, pairs)
-        return self._formatSingle(contextDict, pairs)
+    def format(self, contextDict: Dict, items: List[Dict]) -> str:
+        """itemTemplate 存在 → 批次模式；否則 → 單筆模式。"""
+        if self.itemTemplate:
+            return self._formatBatch(contextDict, items)
+        return self._formatSingle(contextDict, items)
 
-    def _formatBatch(self, contextDict: Dict, pairs: List[Dict]) -> str:
-        """批次模式：每個 pair 渲染後拼接，整段填入 {pairs} 佔位符。"""
-        # 先把每個 pair 各自渲染成一段文字再串起來，最後當成單一 {pairs} 值塞進 taskTemplate。
-        pairsText = ""
-        for i, pairDict in enumerate(pairs, 1):
-            pairsText += _safeFormat(self.pairTemplate, {'i': i, **self._extractPairFields(pairDict)})
-        return _safeFormat(self.taskTemplate, {**contextDict, 'pairs': pairsText})
+    def _formatBatch(self, contextDict: Dict, items: List[Dict]) -> str:
+        """批次模式：每個 item 渲染後拼接，整段填入 {items} 佔位符。"""
+        # 先把每個 item 各自渲染成一段文字再串起來，最後當成單一 {items} 值塞進 taskTemplate。
+        itemsText = ""
+        for i, itemDict in enumerate(items, 1):
+            itemsText += _safeFormat(self.itemTemplate, {'i': i, **self._extractItemFields(itemDict)})
+        return _safeFormat(self.taskTemplate, {**contextDict, 'items': itemsText})
 
-    def _formatSingle(self, contextDict: Dict, pairs: List[Dict]) -> str:
-        """單筆模式：context 與 pairs[0] 合併後直接填入 taskTemplate。pair 欄優先，同名時覆蓋 context。"""     
-        # PPI 只有一個 pair，沒有獨立的 pairTemplate，直接把 context 與 pair 欄位攤平餵進 taskTemplate。
+    def _formatSingle(self, contextDict: Dict, items: List[Dict]) -> str:
+        """單筆模式：context 與 items[0] 合併後直接填入 taskTemplate。item 欄優先，同名時覆蓋 context。"""
+        # PPI 只有一個 item，沒有獨立的 itemTemplate，直接把 context 與 item 欄位攤平餵進 taskTemplate。
         allFieldDict = dict(contextDict)
-        if pairs:
-            allFieldDict.update(self._extractPairFields(pairs[0]))
+        if items:
+            allFieldDict.update(self._extractItemFields(items[0]))
         return _safeFormat(self.taskTemplate, allFieldDict)
 
-    def _extractPairFields(self, pairDict: Dict) -> Dict:
-        """從 pair dict 抽取要送進模板的欄位，一律排除 RESERVED_PAIR_FIELDS 中的內部欄位。"""
-        candidateNameList = self.pairColumns if self.pairColumns else list(pairDict.keys())
+    def _extractItemFields(self, itemDict: Dict) -> Dict:
+        """從 item dict 抽取要送進模板的欄位，一律排除 RESERVED_ITEM_FIELDS 中的內部欄位。"""
+        candidateNameList = self.itemColumns if self.itemColumns else list(itemDict.keys())
         return {
-            name: pairDict[name]
+            name: itemDict[name]
             for name in candidateNameList
-            if name in pairDict and name not in RESERVED_PAIR_FIELDS
+            if name in itemDict and name not in RESERVED_ITEM_FIELDS
         }

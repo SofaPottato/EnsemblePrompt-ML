@@ -8,7 +8,7 @@
 
 - 以多 prompt × 多模型的排列組合，在標準化的 Task CSV 上做分類推論。
 - 自動斷點續傳、用 JSON schema 強制 LLM 輸出格式、產出寬表格與分類指標報表。
-- 一套 config 同時支援 **PPI**（每筆一個標的，如 LLL）與 **BC5CDR**（每筆多個 pair）兩種任務。
+- 一套 config 同時支援 **PPI**（每筆一個標的，如 LLL）與 **BC5CDR**（每筆多個 item）兩種任務。
 
 ## 主要流程
 
@@ -21,7 +21,7 @@ Prompt 組合 CSV ───────────────────┘  
 [ExperimentPipeline.run](llm_modules/Pipeline.py#L68) 將整個流程切成六階段，階段間以檔案傳遞、不靠回傳值：
 
 1. **Load** — 載入 Task CSV × Prompt 組合 × 已完成 checkpoint。
-2. **Build** — 依 `maxPairsPerBatch` 切批、渲染 `taskTemplate`/`pairTemplate`，扣掉已完成任務後產生 `LLMTask` 清單。
+2. **Build** — 依 `maxItemsPerBatch` 切批、渲染 `taskTemplate`/`itemTemplate`，扣掉已完成任務後產生 `LLMTask` 清單。
 3. **Inference** — [LLMEngine](llm_modules/OllamaEngine.py) 非同步呼叫 Ollama，每筆完成即 append 寫入 `raw.csv` + `fsync()` 落盤。
 4. **Parse** — [OutputParser](llm_modules/OutputParser.py) 解析 structured JSON 回應為 0..N-1 的 `predLabel`（無法解析一律 -1）。
 5. **Process** — [LLMResultProcessor](llm_modules/LLMResultProcessor.py) 長表轉寬表：每個 `model|promptID` 一欄。
@@ -49,7 +49,7 @@ flowchart TD
 
     %% 六階段
     S1["① <b>Load</b> · schemas.py<br/>驗證 PPI / BC5CDR"]
-    S2["② <b>Build</b> · PromptFormatter.py<br/>taskTemplate / pairTemplate 渲染<br/>maxPairsPerBatch 切批"]
+    S2["② <b>Build</b> · PromptFormatter.py<br/>taskTemplate / itemTemplate 渲染<br/>maxItemsPerBatch 切批"]
     S3["③ <b>Inference</b> · OllamaEngine.py<br/>雙層 semaphore · asyncio.Lock<br/>httpx → Ollama HTTP API"]
     S4["④ <b>Parse</b> · OutputParser.py<br/>structured JSON → predLabel<br/>解析失敗 / Error → -1"]
     S5["⑤ <b>Process</b> · LLMResultProcessor.py<br/>long → wide pivot<br/>trueLabel 對齊 labelSet"]
@@ -76,7 +76,7 @@ flowchart TD
     S6 -.產出.-> O6
 
     %% 支援模組
-    Support["<b>支援模組</b><br/>schemas.py — Pydantic config / PipelineError / LLMTask / LabelSet<br/>utils.py — logger / seed / YAML / JSON 寬鬆解析"]
+    Support["<b>支援模組</b><br/>schemas.py — Pydantic config / PipelineError / LLMTask / LabelSet<br/>（logger / seed / loadConfig 已併入 Main_PromptCmb.py；utils.py 已移除）"]
     Pipeline -.依賴.-> Support
 
     %% 樣式
@@ -97,7 +97,7 @@ flowchart TD
 
 ```
 .
-├── Main_PromptCmb.py         # 進入點；exit code 0 / 1
+├── Main_PromptCmb.py         # 進入點；logger / seed / loadConfig；exit code 0 / 1
 ├── configs/
 │   ├── PPI_config.yaml       # LLL（PPI）
 │   └── BC5CDR_config.yaml    # BC5CDR（Chemical–Disease）
@@ -108,15 +108,15 @@ flowchart TD
 │   ├── LLMResultProcessor.py # long → wide pivot
 │   ├── Evaluate.py           # 分類指標與圖表
 │   ├── PromptFormatter.py    # Template 渲染
-│   ├── schemas.py            # Pydantic config / Exception / LLMTask
-│   └── utils.py              # logger、seed、YAML 載入、JSON 解析
+│   └── schemas.py            # Pydantic config / Exception / LLMTask / LabelSet
 ├── preprocess/
 │   ├── lll.py                # LLL → tasks.csv（PPI）
 │   └── bc5cdr.py             # BC5CDR → tasks.csv
 ├── promptGenerate/           # 階段零：產生 Prompt 組合 CSV
 │   ├── main_PromptGenerate.py # 進入點；窮舉 / 手動組合方法池
 │   ├── prompt_config.yaml    # 生成模式與輸出路徑設定
-│   └── prompts.yaml          # 方法池（method × 編號）
+│   ├── bc5cdr_prompts.yaml   # BC5CDR 方法池（method × 編號）
+│   └── ppi_prompt.yaml       # PPI 方法池（method × 編號）
 └── data/                     # 輸入資料與輸出（gitignored）
 ```
 
@@ -150,9 +150,9 @@ python Main_PromptCmb.py --config configs/BC5CDR_config.yaml
 python promptGenerate/main_PromptGenerate.py
 ```
 
-### 方法池（prompts.yaml）
+### 方法池（bc5cdr_prompts.yaml / ppi_prompt.yaml）
 
-[prompts.yaml](promptGenerate/prompts.yaml) 在 `prompts:` 底下以「方法分類（method）→ 兩位數編號 → prompt 文字」三層結構定義所有可用片段，例如：
+方法池檔案由 `prompt_config.yaml` 的 `promptYamlPath` 指定（依任務選 [bc5cdr_prompts.yaml](promptGenerate/bc5cdr_prompts.yaml) 或 [ppi_prompt.yaml](promptGenerate/ppi_prompt.yaml)），在 `prompts:` 底下以「方法分類（method）→ 兩位數編號 → prompt 文字」三層結構定義所有可用片段，例如：
 
 ```yaml
 prompts:
@@ -181,8 +181,8 @@ prompts:
 
 | 設定 | 說明 |
 |---|---|
-| `promptYamlPath` | 方法池來源 YAML（預設 `promptGenerate/prompts.yaml`） |
-| `promptCmbOutputPath` | 輸出 CSV 路徑（預設 `data/promptOutput/example_prompts.csv`，UTF-8-SIG），即下游 config 的 `paths.promptCmbPath` |
+| `promptYamlPath` | 方法池來源 YAML（現設 `promptGenerate/bc5cdr_prompts.yaml`） |
+| `promptCmbOutputPath` | 輸出 CSV 路徑（現設 `data/promptOutput/bc5cdr_prompts.csv`，UTF-8-SIG），即下游 config 的 `paths.promptCmbPath` |
 | `autoSettings.selectedMethods` | Auto 模式參與組合的分類清單；`['ALLMethod']` 代表全部 |
 | `autoSettings.maxSize` | Auto 模式單一組合最多包含幾個分類 |
 | `manualCombinations` | Manual 模式要生成的 Prompt ID 組合清單（list of list） |
@@ -195,15 +195,15 @@ prompts:
 
 | 比較項 | PPI | BC5CDR |
 |---|---|---|
-| `pairColumns` | `[]`（空） | 非空，如 `["e1","e2"]` |
+| `itemColumns` | `[]`（空） | 非空，如 `["e1","e2"]` |
 | `labelColumn` | **必填**（如 `"label"`） | 不使用 |
-| `pairTemplate` | 不可設定 | **必填** |
-| `maxPairsPerBatch` | 必須為 `1` | 任意 ≥1 |
-| Task CSV 必要欄位 | `taskID` + `labelColumn` + `contextColumns` | `taskID` + `pairs` (JSON) + `contextColumns` |
+| `itemTemplate` | 不可設定 | **必填** |
+| `maxItemsPerBatch` | 必須為 `1` | 任意 ≥1 |
+| Task CSV 必要欄位 | `taskID` + `labelColumn` + `contextColumns` | `taskID` + `items` (JSON) + `contextColumns` |
 | Ollama JSON schema | `{label}` | `{answers: [{id, label}]}` |
 | 範例 | LLL（每句一個 PPI 判斷） | BC5CDR（每篇 abstract 多個 chemical–disease pair） |
 
-[Pipeline._buildTaskBatches](llm_modules/Pipeline.py#L304) 在 PPI 模式會自動把 Task CSV 的 `labelColumn` 包成單元素 `pairs`，讓下游一律用 pair 為單位處理。
+[Pipeline._buildTaskBatches](llm_modules/Pipeline.py#L304) 在 PPI 模式會自動把 Task CSV 的 `labelColumn` 包成單元素 `items`，讓下游一律用 item 為單位處理。
 
 ## 重要 Config 欄位
 
@@ -214,12 +214,12 @@ prompts:
 | `paths.outputRoot` | 所有輸出的根目錄；其它 `*Path` 未填 / 相對路徑時自動掛在底下 |
 | `selectedModels` | 要測試的 Ollama 模型名稱清單 |
 | `contextColumns` | Task CSV 中對應 `taskTemplate` 佔位符的欄位 |
-| `pairColumns` | `pairs` JSON 中對應 `pairTemplate` 佔位符的欄位；空 → PPI |
+| `itemColumns` | `items` JSON 中對應 `itemTemplate` 佔位符的欄位；空 → PPI |
 | `labelColumn` | PPI 模式下攜帶 true label 的欄位名稱 |
-| `taskTemplate` | 主 prompt 模板；佔位符對應 `contextColumns`（BC5CDR 額外帶 `{pairs}`） |
-| `pairTemplate` | BC5CDR 模式下單筆 pair 的格式化模板（會被渲染到 `{pairs}`） |
+| `taskTemplate` | 主 prompt 模板；佔位符對應 `contextColumns`（BC5CDR 額外帶 `{items}`） |
+| `itemTemplate` | BC5CDR 模式下單筆 item 的格式化模板（會被渲染到 `{items}`） |
 | `labelSet` | 分類類別字串清單；清單索引即整數 code（`["no","yes"]` → no=0, yes=1） |
-| `maxPairsPerBatch` | 每個 LLM task 包含的 pair 數；PPI 必為 1 |
+| `maxItemsPerBatch` | 每個 LLM task 包含的 item 數；PPI 必為 1 |
 | `concurrencyPerModel` / `maxConcurrentModels` | 雙層非同步併發上限 |
 | `ollamaServer.url` / `timeout` | Ollama API 端點與請求超時秒數 |
 | `llmOptions` | 透傳給 Ollama 的推論參數（`temperature`、`num_predict`、`num_ctx`…） |
@@ -231,7 +231,7 @@ prompts:
 - `classes` 清單**索引**即整數 code（`["no","yes"]` → no=0, yes=1）。
 - `labelToLabelCode` 比對時去空白、大小寫不敏感；未命中一律回 `-1`。
 - 同一份 `classes` 也會序列化進 Ollama 的 `format` JSON schema，強制模型只能輸出清單裡的字串。
-- 因此**前處理產出的 gold label 必須與 `labelSet` 完全對齊**；不對齊時 [Pipeline._validateLabelAlignment](llm_modules/Pipeline.py#L267) 會在推論前 fail-fast 拋 `DataLoadError`，這是 preprocess/config 不一致最早被攔下的地方（下游 `LLMResultProcessor._prepareDf` 只負責轉碼、不再重複檢查）。
+- 因此**前處理產出的 gold label 必須與 `labelSet` 完全對齊**；不對齊時 [Pipeline._validateLabels](llm_modules/Pipeline.py#L272) 會在推論前 fail-fast 拋 `DataLoadError`，這是 preprocess/config 不一致最早被攔下的地方（下游 `LLMResultProcessor._prepareDf` 只負責轉碼、不再重複檢查）。
 - `-1`（無法解析或標籤錯誤）在指標計算時被排除，但在難題分析的對錯矩陣中一律計為答錯。
 
 ## 斷點續傳
@@ -258,7 +258,7 @@ prompts:
 | 路徑（相對 `outputRoot`） | 內容 |
 |---|---|
 | `raw.csv` | 推論原始紀錄（append-only checkpoint）；欄位 = `RAW_CSV_COLS` |
-| `result.csv` | 長表，每個 pair × `(model, promptID)` 一列；`predLabel` ∈ {-1, 0..N-1} |
+| `result.csv` | 長表，每個 item × `(model, promptID)` 一列；`predLabel` ∈ {-1, 0..N-1} |
 | `singleOutput/{promptID}_result.csv` | 同上但依 `promptID` 切分 |
 | `partialInfo.csv` | 寬表，一列一樣本；欄位包含 `sentID`, `trueLabel`, 各 `model|promptID__pred` |
 | `fullInfo.csv` | 同上再補 `__raw`（rawOutput）與 `__sysPrompt` 後綴欄，供人工審閱 |
@@ -272,6 +272,6 @@ prompts:
 
 - 命名風格：變數/方法 `camelCase`、類別 `PascalCase`（不是 PEP 8 標準，但全專案一致）。
 - 錯誤統一走 `PipelineError` 家族（`DataLoadError` / `TaskBuildError` / `InferenceError` / `ParsingError`），由 `Main_PromptCmb.py` 一處 catch；各階段不要私吞例外。
-- `RESERVED_PAIR_FIELDS = {'sentID', 'label'}`（`sentID` = sentenceID）是內部欄位，[PromptFormatter._extractPairFields](llm_modules/PromptFormatter.py#L56) 會剔除，永遠不會洩漏進 prompt。新增 pair metadata 時要嘛不加進 `pairColumns`，要嘛更新這個 frozenset。
+- `RESERVED_ITEM_FIELDS = frozenset({'sentID', 'label'})`（`sentID` = sentenceID）是內部欄位，[PromptFormatter._extractItemFields](llm_modules/PromptFormatter.py#L56) 會剔除，永遠不會洩漏進 prompt。新增 item metadata 時要嘛不加進 `itemColumns`，要嘛更新這個 frozenset。
 - `data/`、`logs/`、`docs/` 都在 gitignore 中，不要把輸出檔 commit 進來。
 - 沒有 test suite / linter / build step；驗證方式是手動檢查 `data/<dataset>/output/eval/` 下的輸出。
